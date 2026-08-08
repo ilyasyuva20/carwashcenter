@@ -32,9 +32,12 @@ async function migrate() {
         role VARCHAR(50) NOT NULL DEFAULT 'washer',
         daily_wage NUMERIC NOT NULL DEFAULT 0,
         monthly_salary NUMERIC NOT NULL DEFAULT 0,
+        salary_monthly NUMERIC NOT NULL DEFAULT 0,
         joined_date VARCHAR(50),
+        join_date VARCHAR(50),
         aadhaar_number VARCHAR(50),
-        aadhaar_file TEXT
+        aadhaar_file TEXT,
+        active INT NOT NULL DEFAULT 1
       );
 
       CREATE TABLE IF NOT EXISTS attendance (
@@ -42,6 +45,10 @@ async function migrate() {
         employee_id INT NOT NULL,
         date VARCHAR(50) NOT NULL,
         status VARCHAR(50) NOT NULL,
+        check_in VARCHAR(50),
+        check_out VARCHAR(50),
+        late_minutes INT DEFAULT 0,
+        overtime_minutes INT DEFAULT 0,
         note TEXT,
         UNIQUE(employee_id, date)
       );
@@ -60,12 +67,19 @@ async function migrate() {
         employee_id INT NOT NULL,
         month INT NOT NULL,
         year INT NOT NULL,
-        days_present NUMERIC NOT NULL,
-        daily_wage NUMERIC NOT NULL,
-        gross_pay NUMERIC NOT NULL,
-        total_advances NUMERIC NOT NULL,
+        days_present NUMERIC DEFAULT 0,
+        daily_wage NUMERIC DEFAULT 0,
+        gross_pay NUMERIC DEFAULT 0,
+        total_advances NUMERIC DEFAULT 0,
+        base_salary NUMERIC DEFAULT 0,
+        present_days NUMERIC DEFAULT 0,
+        leave_days NUMERIC DEFAULT 0,
+        late_deduction NUMERIC DEFAULT 0,
+        overtime_pay NUMERIC DEFAULT 0,
+        advance_deduction NUMERIC DEFAULT 0,
         net_pay NUMERIC NOT NULL,
         paid_date VARCHAR(50),
+        generated_at VARCHAR(100),
         UNIQUE(employee_id, month, year)
       );
 
