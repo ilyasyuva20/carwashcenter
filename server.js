@@ -21,7 +21,22 @@ app.use('/api/expenses', require('./routes/expenses'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/workshops', require('./routes/workshops'));
 
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+// Serve static frontend build if dist directory exists
+const frontendDist = path.join(__dirname, '../frontend/dist');
+app.use(express.static(frontendDist));
+
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+    return next();
+  }
+  const indexPath = path.join(frontendDist, 'index.html');
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      res.status(404).send("Car Wash API Running. Build frontend with 'npm run build' inside frontend directory to view UI.");
+    }
+  });
+});
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`Car wash API running on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Car wash app running on http://localhost:${PORT}`));
+
