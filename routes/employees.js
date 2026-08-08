@@ -21,18 +21,18 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY name').all();
+    const rows = await db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY name').all();
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
-    const emp = db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
+    const emp = await db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
     res.json(emp);
   } catch (err) {
@@ -41,7 +41,7 @@ router.get('/:id', (req, res) => {
 });
 
 // Post with optional aadhaar_file upload
-router.post('/', upload.single('aadhaar_file'), (req, res) => {
+router.post('/', upload.single('aadhaar_file'), async (req, res) => {
   try {
     const { name, phone, role, salary_monthly, join_date, branch_id, aadhaar_number } = req.body;
     
@@ -51,7 +51,7 @@ router.post('/', upload.single('aadhaar_file'), (req, res) => {
 
     const aadhaar_file = req.file ? `/uploads/${req.file.filename}` : (req.body.aadhaar_file || null);
 
-    const info = db.prepare(
+    const info = await db.prepare(
       'INSERT INTO employees (name, phone, role, salary_monthly, join_date, branch_id, aadhaar_number, aadhaar_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       name.trim(),
@@ -64,22 +64,23 @@ router.post('/', upload.single('aadhaar_file'), (req, res) => {
       aadhaar_file
     );
     
-    res.json(db.prepare('SELECT * FROM employees WHERE id = ?').get(info.lastInsertRowid));
+    const created = await db.prepare('SELECT * FROM employees WHERE id = ?').get(info.lastInsertRowid);
+    res.json(created);
   } catch (err) {
     console.error('Error creating employee:', err);
     res.status(400).json({ error: err.message });
   }
 });
 
-router.put('/:id', upload.single('aadhaar_file'), (req, res) => {
+router.put('/:id', upload.single('aadhaar_file'), async (req, res) => {
   try {
     const { name, phone, role, salary_monthly, join_date, aadhaar_number } = req.body;
-    const existing = db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
+    const existing = await db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Employee not found' });
 
     const aadhaar_file = req.file ? `/uploads/${req.file.filename}` : existing.aadhaar_file;
 
-    db.prepare(
+    await db.prepare(
       'UPDATE employees SET name=?, phone=?, role=?, salary_monthly=?, join_date=?, aadhaar_number=?, aadhaar_file=? WHERE id=?'
     ).run(
       name || existing.name,
@@ -92,15 +93,16 @@ router.put('/:id', upload.single('aadhaar_file'), (req, res) => {
       req.params.id
     );
     
-    res.json(db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id));
+    const updated = await db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
+    res.json(updated);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(req.params.id);
+    await db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -108,9 +110,9 @@ router.delete('/:id', (req, res) => {
 });
 
 // Download endpoint for Aadhaar card
-router.get('/:id/download-aadhaar', (req, res) => {
+router.get('/:id/download-aadhaar', async (req, res) => {
   try {
-    const emp = db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
+    const emp = await db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
     if (!emp || !emp.aadhaar_file) {
       return res.status(404).send('Aadhaar document not found');
     }
@@ -130,7 +132,7 @@ router.get('/:id/download-aadhaar', (req, res) => {
 });
 
 // Advance payment
-router.post('/:id/advance', (req, res) => {
+router.post('/:id/advance', async (req, res) => {
   try {
     const { amount, date, payment_method, note } = req.body;
     const now = new Date();
@@ -138,19 +140,20 @@ router.post('/:id/advance', (req, res) => {
     const datePart = date || now.toISOString().slice(0, 10);
     const fullTimestamp = `${datePart} ${timeStr}`;
 
-    const info = db.prepare(
+    const info = await db.prepare(
       'INSERT INTO advances (employee_id, date, amount, payment_method, note) VALUES (?, ?, ?, ?, ?)'
     ).run(req.params.id, fullTimestamp, amount, payment_method || 'cash', note || null);
 
-    res.json(db.prepare('SELECT * FROM advances WHERE id = ?').get(info.lastInsertRowid));
+    const advance = await db.prepare('SELECT * FROM advances WHERE id = ?').get(info.lastInsertRowid);
+    res.json(advance);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-router.get('/:id/advances', (req, res) => {
+router.get('/:id/advances', async (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM advances WHERE employee_id = ? ORDER BY date DESC').all(req.params.id);
+    const rows = await db.prepare('SELECT * FROM advances WHERE employee_id = ? ORDER BY date DESC').all(req.params.id);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });

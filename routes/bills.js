@@ -11,7 +11,7 @@ const REDEEM_DISCOUNT_PCT = 50;
 // Download PDF Receipt for a job
 router.get('/pdf/:jobId', async (req, res) => {
   try {
-    const job = getJobFull(req.params.jobId);
+    const job = await getJobFull(req.params.jobId);
     if (!job) return res.status(404).send('Job not found');
 
     const isPaid = job.payment_status === 'settled' || (job.bill && job.bill.status === 'paid');
@@ -254,338 +254,347 @@ router.get('/pdf/:jobId', async (req, res) => {
 });
 
 // Preview what the bill would look like for a job (before payment)
-router.get('/preview/:jobId', (req, res) => {
-  const job = getJobFull(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  if (job.price == null) return res.status(400).json({ error: 'No price configured for this segment/wash type' });
+router.get('/preview/:jobId', async (req, res) => {
+  try {
+    const job = await getJobFull(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.price == null) return res.status(400).json({ error: 'No price configured for this segment/wash type' });
 
-  let customer = null;
-  if (job.vehicle.customer_id) {
-    customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(job.vehicle.customer_id);
+    let customer = null;
+    if (job.vehicle?.customer_id) {
+      customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(job.vehicle.customer_id);
+    }
+    const canRedeem = !!(customer && customer.reward_points >= REDEEM_THRESHOLD);
+
+    res.json({
+      job_id: job.id,
+      reg_number: job.vehicle.reg_number,
+      wash_type: job.wash_type?.name,
+      amount: job.price,
+      customer,
+      can_redeem: canRedeem,
+      redeem_discount_pct: REDEEM_DISCOUNT_PCT,
+      points_per_wash: POINTS_PER_WASH
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  const canRedeem = !!(customer && customer.reward_points >= REDEEM_THRESHOLD);
-
-  res.json({
-    job_id: job.id,
-    reg_number: job.vehicle.reg_number,
-    wash_type: job.wash_type.name,
-    amount: job.price,
-    customer,
-    can_redeem: canRedeem,
-    redeem_discount_pct: REDEEM_DISCOUNT_PCT,
-    points_per_wash: POINTS_PER_WASH
-  });
 });
 
 // Create + pay a bill. Body: { job_id, payment_method: 'cash'|'gpay', redeem: bool }
-router.post('/', (req, res) => {
-  const { job_id, payment_method, redeem } = req.body;
-  const job = getJobFull(job_id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  if (job.price == null) return res.status(400).json({ error: 'No price configured for this segment/wash type' });
-  if (job.bill) return res.status(400).json({ error: 'Bill already exists for this job' });
+router.post('/', async (req, res) => {
+  try {
+    const { job_id, payment_method, redeem } = req.body;
+    const job = await getJobFull(job_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.price == null) return res.status(400).json({ error: 'No price configured for this segment/wash type' });
+    if (job.bill) return res.status(400).json({ error: 'Bill already exists for this job' });
 
-  let customer = null;
-  if (job.vehicle.customer_id) {
-    customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(job.vehicle.customer_id);
+    let customer = null;
+    if (job.vehicle?.customer_id) {
+      customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(job.vehicle.customer_id);
+    }
+
+    let discount = 0;
+    let pointsRedeemed = 0;
+    if (redeem && customer && customer.reward_points >= REDEEM_THRESHOLD) {
+      discount = Math.round(job.price * (REDEEM_DISCOUNT_PCT / 100));
+      pointsRedeemed = REDEEM_THRESHOLD;
+    }
+    const finalAmount = Math.max(0, job.price - discount);
+
+    const info = await db.prepare(`
+      INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)
+    `).run(job.id, job.price, discount, finalAmount, payment_method, POINTS_PER_WASH, pointsRedeemed, new Date().toISOString());
+
+    if (customer) {
+      const newPoints = customer.reward_points - pointsRedeemed + POINTS_PER_WASH;
+      await db.prepare('UPDATE customers SET reward_points = ? WHERE id = ?').run(newPoints, customer.id);
+    }
+
+    const bill = await db.prepare('SELECT * FROM bills WHERE id = ?').get(info.lastInsertRowid);
+    res.json({ ...bill, job });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  let discount = 0;
-  let pointsRedeemed = 0;
-  if (redeem && customer && customer.reward_points >= REDEEM_THRESHOLD) {
-    discount = Math.round(job.price * (REDEEM_DISCOUNT_PCT / 100));
-    pointsRedeemed = REDEEM_THRESHOLD;
-  }
-  const finalAmount = Math.max(0, job.price - discount);
-
-  const info = db.prepare(`
-    INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)
-  `).run(job.id, job.price, discount, finalAmount, payment_method, POINTS_PER_WASH, pointsRedeemed, new Date().toISOString());
-
-  if (customer) {
-    const newPoints = customer.reward_points - pointsRedeemed + POINTS_PER_WASH;
-    db.prepare('UPDATE customers SET reward_points = ? WHERE id = ?').run(newPoints, customer.id);
-  }
-
-  const bill = db.prepare('SELECT * FROM bills WHERE id = ?').get(info.lastInsertRowid);
-  res.json({ ...bill, job });
 });
 
 // Get Normal Retail Customer Bills & Summary
-router.get('/', (req, res) => {
-  const { date, startDate, endDate, segment, payment_status, q } = req.query;
+router.get('/', async (req, res) => {
+  try {
+    const { date, startDate, endDate, segment, payment_status, q } = req.query;
 
-  // 1. Fetch completed normal customer jobs
-  let rawJobs = db.prepare(`
-    SELECT id, entry_time, exit_time, payment_status 
-    FROM jobs 
-    WHERE (customer_type != 'workshop' OR customer_type IS NULL) 
-      AND status = 'completed'
-    ORDER BY id DESC
-  `).all();
+    let rawJobs = await db.prepare(`
+      SELECT id, entry_time, exit_time, payment_status 
+      FROM jobs 
+      WHERE (customer_type != 'workshop' OR customer_type IS NULL) 
+        AND status = 'completed'
+      ORDER BY id DESC
+    `).all();
 
-  // Date filtering
-  if (startDate && endDate) {
-    rawJobs = rawJobs.filter(j => {
-      const d = (j.exit_time || j.entry_time || '').slice(0, 10);
-      return d >= startDate && d <= endDate;
+    if (startDate && endDate) {
+      rawJobs = rawJobs.filter(j => {
+        const d = (j.exit_time || j.entry_time || '').slice(0, 10);
+        return d >= startDate && d <= endDate;
+      });
+    } else if (date) {
+      rawJobs = rawJobs.filter(j => (j.exit_time || j.entry_time || '').startsWith(date));
+    }
+
+    let jobs = (await Promise.all(rawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
+
+    if (segment && segment !== 'all') {
+      if (segment === 'car') {
+        jobs = jobs.filter(j => j.vehicle?.segment !== 'bike' && j.vehicle?.segment !== 'scooter');
+      } else if (segment === 'bike') {
+        jobs = jobs.filter(j => j.vehicle?.segment === 'bike' || j.vehicle?.segment === 'scooter');
+      }
+    }
+
+    let summaryJobs = [...jobs];
+
+    if (payment_status && payment_status !== 'all') {
+      if (payment_status === 'unpaid' || payment_status === 'unsettled') {
+        jobs = jobs.filter(j => j.payment_status !== 'settled' && (!j.bill || j.bill.status !== 'paid'));
+      } else if (payment_status === 'paid' || payment_status === 'settled') {
+        jobs = jobs.filter(j => j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid'));
+      }
+    }
+
+    if (q) {
+      const search = q.toLowerCase().trim();
+      jobs = jobs.filter(j =>
+        (j.vehicle?.reg_number || '').toLowerCase().includes(search) ||
+        (j.vehicle?.phone || '').toLowerCase().includes(search) ||
+        (j.vehicle?.brand || '').toLowerCase().includes(search) ||
+        (j.vehicle?.model || '').toLowerCase().includes(search)
+      );
+    }
+
+    let totalCars = 0;
+    let totalBikes = 0;
+    let totalAmount = 0;
+    let unpaidAmount = 0;
+    let paidAmount = 0;
+
+    summaryJobs.forEach(j => {
+      const isBike = j.vehicle?.segment === 'bike' || j.vehicle?.segment === 'scooter';
+      if (isBike) totalBikes++;
+      else totalCars++;
+
+      const price = j.bill?.final_amount != null ? Number(j.bill.final_amount) : (Number(j.price) || 0);
+      totalAmount += price;
+
+      if (j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid')) {
+        paidAmount += price;
+      } else {
+        unpaidAmount += price;
+      }
     });
-  } else if (date) {
-    rawJobs = rawJobs.filter(j => (j.exit_time || j.entry_time || '').startsWith(date));
+
+    res.json({
+      summary: {
+        total_cars: totalCars,
+        total_bikes: totalBikes,
+        total_vehicles: totalCars + totalBikes,
+        total_amount: totalAmount,
+        unpaid_amount: unpaidAmount,
+        paid_amount: paidAmount
+      },
+      jobs
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  // Map to full job objects
-  let jobs = rawJobs.map(j => getJobFull(j.id)).filter(Boolean);
-
-  // Segment filtering
-  if (segment && segment !== 'all') {
-    if (segment === 'car') {
-      jobs = jobs.filter(j => j.vehicle?.segment !== 'bike' && j.vehicle?.segment !== 'scooter');
-    } else if (segment === 'bike') {
-      jobs = jobs.filter(j => j.vehicle?.segment === 'bike' || j.vehicle?.segment === 'scooter');
-    }
-  }
-
-  // Search filter for summary dataset
-  let summaryJobs = [...jobs];
-
-  // Payment status filtering ('unpaid'/'unsettled' vs 'paid'/'settled')
-  if (payment_status && payment_status !== 'all') {
-    if (payment_status === 'unpaid' || payment_status === 'unsettled') {
-      jobs = jobs.filter(j => j.payment_status !== 'settled' && (!j.bill || j.bill.status !== 'paid'));
-    } else if (payment_status === 'paid' || payment_status === 'settled') {
-      jobs = jobs.filter(j => j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid'));
-    }
-  }
-
-  // Search filter
-  if (q) {
-    const search = q.toLowerCase().trim();
-    jobs = jobs.filter(j =>
-      (j.vehicle?.reg_number || '').toLowerCase().includes(search) ||
-      (j.vehicle?.phone || '').toLowerCase().includes(search) ||
-      (j.vehicle?.brand || '').toLowerCase().includes(search) ||
-      (j.vehicle?.model || '').toLowerCase().includes(search)
-    );
-  }
-
-  let totalCars = 0;
-  let totalBikes = 0;
-  let totalAmount = 0;
-  let unpaidAmount = 0;
-  let paidAmount = 0;
-
-  summaryJobs.forEach(j => {
-    const isBike = j.vehicle?.segment === 'bike' || j.vehicle?.segment === 'scooter';
-    if (isBike) totalBikes++;
-    else totalCars++;
-
-    const price = j.bill?.final_amount != null ? j.bill.final_amount : (j.price || 0);
-    totalAmount += price;
-
-    if (j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid')) {
-      paidAmount += price;
-    } else {
-      unpaidAmount += price;
-    }
-  });
-
-  res.json({
-    summary: {
-      total_cars: totalCars,
-      total_bikes: totalBikes,
-      total_vehicles: totalCars + totalBikes,
-      total_amount: totalAmount,
-      unpaid_amount: unpaidAmount,
-      paid_amount: paidAmount
-    },
-    jobs
-  });
 });
 
-router.get('/workshop-summary', (req, res) => {
-  const { date, startDate, endDate, type, workshop_id, payment_status, q } = req.query;
+router.get('/workshop-summary', async (req, res) => {
+  try {
+    const { date, startDate, endDate, type, workshop_id, payment_status, q } = req.query;
 
-  let workshops = db.prepare('SELECT * FROM workshops ORDER BY name ASC').all();
-  if (type && type !== 'all') {
-    workshops = workshops.filter(w => w.type === type);
-  }
-  if (workshop_id && workshop_id !== 'all') {
-    workshops = workshops.filter(w => String(w.id) === String(workshop_id));
-  }
-  if (q) {
-    const search = q.toLowerCase();
-    workshops = workshops.filter(w =>
-      (w.name || '').toLowerCase().includes(search) ||
-      (w.phone || '').toLowerCase().includes(search) ||
-      (w.owner_name || '').toLowerCase().includes(search)
-    );
-  }
+    let workshops = await db.prepare('SELECT * FROM workshops ORDER BY name ASC').all();
+    if (type && type !== 'all') {
+      workshops = workshops.filter(w => w.type === type);
+    }
+    if (workshop_id && workshop_id !== 'all') {
+      workshops = workshops.filter(w => String(w.id) === String(workshop_id));
+    }
+    if (q) {
+      const search = q.toLowerCase();
+      workshops = workshops.filter(w =>
+        (w.name || '').toLowerCase().includes(search) ||
+        (w.phone || '').toLowerCase().includes(search) ||
+        (w.owner_name || '').toLowerCase().includes(search)
+      );
+    }
 
-  let rawJobs = db.prepare("SELECT id, entry_time, workshop_id, payment_status FROM jobs WHERE customer_type = 'workshop' ORDER BY id DESC").all();
+    let rawJobs = await db.prepare("SELECT id, entry_time, workshop_id, payment_status FROM jobs WHERE customer_type = 'workshop' ORDER BY id DESC").all();
 
-  if (startDate && endDate) {
-    rawJobs = rawJobs.filter(j => {
-      const d = (j.entry_time || '').slice(0, 10);
-      return d >= startDate && d <= endDate;
+    if (startDate && endDate) {
+      rawJobs = rawJobs.filter(j => {
+        const d = (j.entry_time || '').slice(0, 10);
+        return d >= startDate && d <= endDate;
+      });
+    } else if (date) {
+      rawJobs = rawJobs.filter(j => (j.entry_time || '').startsWith(date));
+    }
+
+    if (payment_status && payment_status !== 'all') {
+      rawJobs = rawJobs.filter(j => j.payment_status === payment_status);
+    }
+
+    const fullJobs = (await Promise.all(rawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
+
+    const workshopMap = {};
+    workshops.forEach(w => {
+      workshopMap[w.id] = {
+        ...w,
+        cars_count: 0,
+        bikes_count: 0,
+        total_vehicles: 0,
+        total_amount: 0,
+        unpaid_amount: 0,
+        paid_amount: 0,
+        jobs: []
+      };
     });
-  } else if (date) {
-    rawJobs = rawJobs.filter(j => (j.entry_time || '').startsWith(date));
-  }
 
-  if (payment_status && payment_status !== 'all') {
-    rawJobs = rawJobs.filter(j => j.payment_status === payment_status);
-  }
+    let unassignedJobs = [];
+    let overallCars = 0;
+    let overallBikes = 0;
+    let overallAmount = 0;
+    let overallUnpaid = 0;
+    let overallPaid = 0;
 
-  const fullJobs = rawJobs.map(j => getJobFull(j.id)).filter(Boolean);
+    fullJobs.forEach(job => {
+      const isBikeOrScooter = job.vehicle?.segment === 'bike' || job.vehicle?.segment === 'scooter';
+      const isCar = !isBikeOrScooter;
 
-  const workshopMap = {};
-  workshops.forEach(w => {
-    workshopMap[w.id] = {
-      ...w,
-      cars_count: 0,
-      bikes_count: 0,
-      total_vehicles: 0,
-      total_amount: 0,
-      unpaid_amount: 0,
-      paid_amount: 0,
-      jobs: []
-    };
-  });
+      if (type === 'Car Workshop' && !isCar) return;
+      if (type === 'Bike Workshop' && !isBikeOrScooter) return;
 
-  let unassignedJobs = [];
-  let overallCars = 0;
-  let overallBikes = 0;
-  let overallAmount = 0;
-  let overallUnpaid = 0;
-  let overallPaid = 0;
+      if (isCar) overallCars++;
+      else overallBikes++;
 
-  fullJobs.forEach(job => {
-    const isBikeOrScooter = job.vehicle?.segment === 'bike' || job.vehicle?.segment === 'scooter';
-    const isCar = !isBikeOrScooter;
-
-    // Strict category filtering: Car Workshop only gets Car jobs, Bike Workshop only gets Bike jobs
-    if (type === 'Car Workshop' && !isCar) return;
-    if (type === 'Bike Workshop' && !isBikeOrScooter) return;
-
-    if (isCar) overallCars++;
-    else overallBikes++;
-
-    const price = job.price || 0;
-    overallAmount += price;
-    if (job.payment_status === 'settled') {
-      overallPaid += price;
-    } else {
-      overallUnpaid += price;
-    }
-
-    if (job.workshop_id && workshopMap[job.workshop_id]) {
-      const w = workshopMap[job.workshop_id];
-      w.jobs.push(job);
-      w.total_vehicles++;
-      if (isCar) w.cars_count++;
-      else w.bikes_count++;
-      w.total_amount += price;
+      const price = Number(job.price) || 0;
+      overallAmount += price;
       if (job.payment_status === 'settled') {
-        w.paid_amount += price;
+        overallPaid += price;
       } else {
-        w.unpaid_amount += price;
+        overallUnpaid += price;
       }
-    } else if (!job.workshop_id) {
-      unassignedJobs.push(job);
-    }
-  });
 
-  res.json({
-    summary: {
-      total_cars: overallCars,
-      total_bikes: overallBikes,
-      total_vehicles: overallCars + overallBikes,
-      total_amount: overallAmount,
-      unpaid_amount: overallUnpaid,
-      paid_amount: overallPaid
-    },
-    workshops: Object.values(workshopMap),
-    unassigned_jobs: unassignedJobs
-  });
+      if (job.workshop_id && workshopMap[job.workshop_id]) {
+        const w = workshopMap[job.workshop_id];
+        w.jobs.push(job);
+        w.total_vehicles++;
+        if (isCar) w.cars_count++;
+        else w.bikes_count++;
+        w.total_amount += price;
+        if (job.payment_status === 'settled') {
+          w.paid_amount += price;
+        } else {
+          w.unpaid_amount += price;
+        }
+      } else if (!job.workshop_id) {
+        unassignedJobs.push(job);
+      }
+    });
+
+    res.json({
+      summary: {
+        total_cars: overallCars,
+        total_bikes: overallBikes,
+        total_vehicles: overallCars + overallBikes,
+        total_amount: overallAmount,
+        unpaid_amount: overallUnpaid,
+        paid_amount: overallPaid
+      },
+      workshops: Object.values(workshopMap),
+      unassigned_jobs: unassignedJobs
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Single job settlement endpoint
-router.post('/settle-job', (req, res) => {
-  const { job_id, payment_method } = req.body;
-  if (!job_id) return res.status(400).json({ error: 'job_id is required' });
+router.post('/settle-job', async (req, res) => {
+  try {
+    const { job_id, payment_method } = req.body;
+    if (!job_id) return res.status(400).json({ error: 'job_id is required' });
 
-  const job = getJobFull(job_id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
+    const job = await getJobFull(job_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
 
-  const payMethod = payment_method || 'cash';
-  const now = new Date().toISOString();
+    const payMethod = payment_method || 'cash';
+    const now = new Date().toISOString();
 
-  db.prepare("UPDATE jobs SET payment_status = 'settled' WHERE id = ?").run(job.id);
+    await db.prepare("UPDATE jobs SET payment_status = 'settled' WHERE id = ?").run(job.id);
 
-  const existingBill = db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
-  if (existingBill) {
-    db.prepare("UPDATE bills SET status = 'paid', payment_method = ?, paid_at = ? WHERE id = ?")
-      .run(payMethod, now, existingBill.id);
-  } else {
-    db.prepare(`
-      INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-      VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
-    `).run(job.id, job.price, job.price, payMethod, now);
+    const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
+    if (existingBill) {
+      await db.prepare("UPDATE bills SET status = 'paid', payment_method = ?, paid_at = ? WHERE id = ?")
+        .run(payMethod, now, existingBill.id);
+    } else {
+      await db.prepare(`
+        INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
+        VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
+      `).run(job.id, job.price, job.price, payMethod, now);
+    }
+
+    const updatedJob = await getJobFull(job.id);
+    res.json({ ok: true, job: updatedJob });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.json({ ok: true, job: getJobFull(job.id) });
 });
 
 // Bulk workshop settlement endpoint
-router.post('/settle-workshop', (req, res) => {
-  const { job_ids, payment_method, itemized_payments } = req.body;
-  if (!Array.isArray(job_ids) || job_ids.length === 0) {
-    return res.status(400).json({ error: 'job_ids array is required' });
-  }
+router.post('/settle-workshop', async (req, res) => {
+  try {
+    const { job_ids, payment_method, itemized_payments } = req.body;
+    if (!Array.isArray(job_ids) || job_ids.length === 0) {
+      return res.status(400).json({ error: 'job_ids array is required' });
+    }
 
-  const defaultMethod = payment_method || 'cash';
-  const now = new Date().toISOString();
-  let settledCount = 0;
-  let totalSettledAmount = 0;
+    const defaultMethod = payment_method || 'cash';
+    const now = new Date().toISOString();
+    let settledCount = 0;
+    let totalSettledAmount = 0;
 
-  const updateJobStmt = db.prepare("UPDATE jobs SET payment_status = 'settled' WHERE id = ?");
-  const getBillStmt = db.prepare('SELECT * FROM bills WHERE job_id = ?');
-  const updateBillStmt = db.prepare("UPDATE bills SET status = 'paid', payment_method = ?, paid_at = ? WHERE id = ?");
-  const insertBillStmt = db.prepare(`
-    INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-    VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
-  `);
-
-  const transaction = db.transaction(() => {
     for (const id of job_ids) {
-      const job = getJobFull(id);
+      const job = await getJobFull(id);
       if (!job) continue;
 
       const method = (itemized_payments && itemized_payments[id]) ? itemized_payments[id] : defaultMethod;
 
-      updateJobStmt.run(job.id);
+      await db.prepare("UPDATE jobs SET payment_status = 'settled' WHERE id = ?").run(job.id);
 
-      const existingBill = getBillStmt.get(job.id);
+      const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
       if (existingBill) {
-        updateBillStmt.run(method, now, existingBill.id);
+        await db.prepare("UPDATE bills SET status = 'paid', payment_method = ?, paid_at = ? WHERE id = ?")
+          .run(method, now, existingBill.id);
       } else {
-        insertBillStmt.run(job.id, job.price, job.price, method, now);
+        await db.prepare(`
+          INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
+          VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
+        `).run(job.id, job.price, job.price, method, now);
       }
 
       settledCount++;
-      totalSettledAmount += (job.price || 0);
+      totalSettledAmount += (Number(job.price) || 0);
     }
-  });
 
-  transaction();
-
-  res.json({
-    ok: true,
-    settled_count: settledCount,
-    total_amount: totalSettledAmount
-  });
+    res.json({
+      ok: true,
+      settled_count: settledCount,
+      total_amount: totalSettledAmount
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
