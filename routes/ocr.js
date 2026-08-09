@@ -62,25 +62,22 @@ function parsePlateFromText(rawText) {
   if (!rawText) return '';
   const textUpper = rawText.toUpperCase();
   
+  // Extract and clean individual lines
   const lines = textUpper
     .split(/[\r\n]+/)
     .map(l => l.replace(/[^A-Z0-9]/g, ''))
     .filter(Boolean);
 
-  const fullClean = textUpper.replace(/[^A-Z0-9]/g, '');
+  // Filter out noise watermarks and brand text
+  const plateLinesOnly = lines.filter(l => l !== 'IND' && l !== 'INDIA' && l !== 'HERO' && l !== 'HONDA' && l !== 'ATHER' && l !== 'PALAL' && l !== 'MOBILITY');
 
-  // 1. Direct Regex Match on cleaned full text
-  let m = fullClean.match(PLATE_REGEX_SEARCH);
-  if (m) return m[0];
-
-  // 2. Individual Line Match
-  for (const line of lines) {
+  // 1. Check individual lines for exact plate
+  for (const line of plateLinesOnly) {
     let lm = line.match(PLATE_REGEX_SEARCH);
     if (lm) return lm[0];
   }
 
-  // 3. Multi-line combination (Filter out watermarks like IND / INDIA)
-  const plateLinesOnly = lines.filter(l => l !== 'IND' && l !== 'INDIA' && l !== 'HERO' && l !== 'HONDA');
+  // 2. Check multi-line combinations (e.g. 2-line scooter plate KL43 \n S9064 -> KL43S9064)
   for (let i = 0; i < plateLinesOnly.length - 1; i++) {
     const combined = plateLinesOnly[i] + plateLinesOnly[i + 1];
     let cm = combined.match(PLATE_REGEX_SEARCH);
@@ -93,8 +90,13 @@ function parsePlateFromText(rawText) {
     }
   }
 
-  // 4. Try Position Repair on 8-11 character chunks
-  const chunks = fullClean.match(/[A-Z0-9]{8,11}/g) || [];
+  // 3. Check combined text of valid plate lines
+  const combinedPlateText = plateLinesOnly.join('');
+  let m = combinedPlateText.match(PLATE_REGEX_SEARCH);
+  if (m) return m[0];
+
+  // 4. Position Repair on 8-11 character chunks
+  const chunks = combinedPlateText.match(/[A-Z0-9]{8,11}/g) || [];
   for (const chunk of chunks) {
     const repaired = repairPlateString(chunk);
     if (PLATE_REGEX_STRICT.test(repaired)) {
@@ -103,10 +105,10 @@ function parsePlateFromText(rawText) {
   }
 
   // 5. Fallback 4-digit number extraction
-  const partialWithState = fullClean.match(/[A-Z]{2}[0-9]{0,4}[0-9]{4}/);
+  const partialWithState = combinedPlateText.match(/[A-Z]{2}[0-9]{0,4}[0-9]{4}/);
   if (partialWithState) return partialWithState[0];
 
-  const fourDigit = fullClean.match(FOUR_DIGIT_REGEX);
+  const fourDigit = combinedPlateText.match(FOUR_DIGIT_REGEX);
   if (fourDigit) return fourDigit[0];
 
   return '';
