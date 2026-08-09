@@ -15,7 +15,10 @@ function repairPlateString(str) {
   if (!str) return '';
   const clean = str.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-  if (PLATE_REGEX_STRICT.test(clean)) return clean;
+  const stateCode = clean.slice(0, 2);
+  const isValidState = INDIAN_STATES.includes(stateCode) || stateCode === 'BH';
+
+  if (PLATE_REGEX_STRICT.test(clean) && isValidState) return clean;
 
   const letterToDigit = { 'O': '0', 'Q': '0', 'D': '0', 'I': '1', 'L': '1', 'Z': '2', 'E': '3', 'A': '4', 'S': '5', 'G': '6', 'T': '7', 'B': '8', 'N': '9' };
   const digitToLetter = { '0': 'O', '1': 'I', '2': 'Z', '3': 'E', '4': 'A', '5': 'S', '6': 'G', '7': 'T', '8': 'B', '9': 'N' };
@@ -23,9 +26,10 @@ function repairPlateString(str) {
   if (clean.length >= 8 && clean.length <= 11) {
     let state = clean.slice(0, 2);
     let stateFixed = state.split('').map(ch => digitToLetter[ch] || ch).join('');
-    if (stateFixed === 'KE' || stateFixed === 'KI' || stateFixed === 'K1') stateFixed = 'KL';
-    else if (!INDIAN_STATES.includes(stateFixed)) {
-      if (stateFixed.startsWith('K')) stateFixed = 'KL';
+    if (stateFixed === 'KE' || stateFixed === 'KI' || stateFixed === 'K1' || stateFixed === 'ZL' || stateFixed === '7L' || stateFixed === 'XL' || stateFixed === '2L' || stateFixed.endsWith('L')) {
+      stateFixed = 'KL';
+    } else if (!INDIAN_STATES.includes(stateFixed)) {
+      if (stateFixed.startsWith('K') || stateFixed.endsWith('L')) stateFixed = 'KL';
       else if (stateFixed.startsWith('M')) stateFixed = 'MH';
       else if (stateFixed.startsWith('D')) stateFixed = 'DL';
       else if (stateFixed.startsWith('T')) stateFixed = 'TN';
@@ -69,30 +73,42 @@ function parsePlateFromText(rawText) {
 
   // 1. Direct line match or repaired line match
   for (const line of lines) {
-    let lm = line.match(PLATE_REGEX_SEARCH);
-    if (lm) return lm[0];
-
     let rep = repairPlateString(line);
-    if (PLATE_REGEX_STRICT.test(rep)) return rep;
+    if (PLATE_REGEX_STRICT.test(rep)) {
+      const st = rep.slice(0, 2);
+      if (INDIAN_STATES.includes(st) || st === 'BH') return rep;
+    }
+
+    let lm = line.match(PLATE_REGEX_SEARCH);
+    if (lm) {
+      const repLm = repairPlateString(lm[0]);
+      if (PLATE_REGEX_STRICT.test(repLm)) return repLm;
+    }
   }
 
-  // 2. Multi-line combinations repaired (filtering watermark words)
+  // 2. Multi-line combinations repaired
   const plateLinesOnly = lines.filter(l => l !== 'IND' && l !== 'INDIA' && l !== 'HERO' && l !== 'HONDA' && l !== 'ATHER' && l !== 'PALAL' && l !== 'MOBILITY');
   for (let i = 0; i < plateLinesOnly.length - 1; i++) {
     const combined = plateLinesOnly[i] + plateLinesOnly[i + 1];
-    let cm = combined.match(PLATE_REGEX_SEARCH);
-    if (cm) return cm[0];
-
     let rep = repairPlateString(combined);
     if (PLATE_REGEX_STRICT.test(rep)) return rep;
 
+    let cm = combined.match(PLATE_REGEX_SEARCH);
+    if (cm) {
+      const repCm = repairPlateString(cm[0]);
+      if (PLATE_REGEX_STRICT.test(repCm)) return repCm;
+    }
+
     if (i < plateLinesOnly.length - 2) {
       const combined3 = plateLinesOnly[i] + plateLinesOnly[i + 1] + plateLinesOnly[i + 2];
-      let cm3 = combined3.match(PLATE_REGEX_SEARCH);
-      if (cm3) return cm3[0];
-
       let rep3 = repairPlateString(combined3);
       if (PLATE_REGEX_STRICT.test(rep3)) return rep3;
+
+      let cm3 = combined3.match(PLATE_REGEX_SEARCH);
+      if (cm3) {
+        const repCm3 = repairPlateString(cm3[0]);
+        if (PLATE_REGEX_STRICT.test(repCm3)) return repCm3;
+      }
     }
   }
 
