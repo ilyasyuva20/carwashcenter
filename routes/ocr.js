@@ -61,28 +61,40 @@ function repairPlateString(str) {
 function parsePlateFromText(rawText) {
   if (!rawText) return '';
   const textUpper = rawText.toUpperCase();
-  const clean = textUpper.replace(/[^A-Z0-9]/g, '');
+  
+  const lines = textUpper
+    .split(/[\r\n]+/)
+    .map(l => l.replace(/[^A-Z0-9]/g, ''))
+    .filter(Boolean);
 
-  // 1. Direct Regex Match on cleaned blob (e.g. KL43S9064, KA03AB6252)
-  let m = clean.match(PLATE_REGEX_SEARCH);
+  const fullClean = textUpper.replace(/[^A-Z0-9]/g, '');
+
+  // 1. Direct Regex Match on cleaned full text
+  let m = fullClean.match(PLATE_REGEX_SEARCH);
   if (m) return m[0];
 
-  // 2. Line by Line Match
-  const lines = textUpper.split(/[\r\n]+/).map(l => l.replace(/[^A-Z0-9]/g, '')).filter(Boolean);
+  // 2. Individual Line Match
   for (const line of lines) {
     let lm = line.match(PLATE_REGEX_SEARCH);
     if (lm) return lm[0];
   }
 
-  // 3. Multi-line combination (e.g., 2-line scooter plates KL 32 \n H 2920)
-  for (let i = 0; i < lines.length - 1; i++) {
-    const combined = lines[i] + lines[i + 1];
+  // 3. Multi-line combination (Filter out watermarks like IND / INDIA)
+  const plateLinesOnly = lines.filter(l => l !== 'IND' && l !== 'INDIA' && l !== 'HERO' && l !== 'HONDA');
+  for (let i = 0; i < plateLinesOnly.length - 1; i++) {
+    const combined = plateLinesOnly[i] + plateLinesOnly[i + 1];
     let cm = combined.match(PLATE_REGEX_SEARCH);
     if (cm) return cm[0];
+
+    if (i < plateLinesOnly.length - 2) {
+      const combined3 = plateLinesOnly[i] + plateLinesOnly[i + 1] + plateLinesOnly[i + 2];
+      let cm3 = combined3.match(PLATE_REGEX_SEARCH);
+      if (cm3) return cm3[0];
+    }
   }
 
   // 4. Try Position Repair on 8-11 character chunks
-  const chunks = clean.match(/[A-Z0-9]{8,11}/g) || [];
+  const chunks = fullClean.match(/[A-Z0-9]{8,11}/g) || [];
   for (const chunk of chunks) {
     const repaired = repairPlateString(chunk);
     if (PLATE_REGEX_STRICT.test(repaired)) {
@@ -90,11 +102,11 @@ function parsePlateFromText(rawText) {
     }
   }
 
-  // 5. Fallback: State + 4 digits or standalone 4 digits
-  const partialWithState = clean.match(/[A-Z]{2}[0-9]{0,4}[0-9]{4}/);
+  // 5. Fallback 4-digit number extraction
+  const partialWithState = fullClean.match(/[A-Z]{2}[0-9]{0,4}[0-9]{4}/);
   if (partialWithState) return partialWithState[0];
 
-  const fourDigit = clean.match(FOUR_DIGIT_REGEX);
+  const fourDigit = fullClean.match(FOUR_DIGIT_REGEX);
   if (fourDigit) return fourDigit[0];
 
   return '';
@@ -115,7 +127,7 @@ router.post('/scan', async (req, res) => {
       base64Data = `data:image/jpeg;base64,${base64Data}`;
     }
 
-    const formData = new URLSearchParams();
+    const formData = new FormData();
     formData.append('apikey', apiKey);
     formData.append('base64Image', base64Data);
     formData.append('OCREngine', '2'); // Deep Learning AI Vision Engine
@@ -124,9 +136,6 @@ router.post('/scan', async (req, res) => {
 
     const response = await fetch('https://api.ocr.space/parse/image', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
       body: formData,
     });
 
