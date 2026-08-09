@@ -3,18 +3,24 @@ const router = express.Router();
 const db = require('../db');
 const { lookupVehicle } = require('../services/rtoLookup');
 
+const REGEX_PLATE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$|^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$/;
+
 // Lookup (and cache) vehicle info by reg number
 router.get('/lookup/:regNumber', async (req, res) => {
   try {
-    const regNumber = req.params.regNumber.toUpperCase().replace(/\s+/g, '');
+    const regNumber = req.params.regNumber.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!REGEX_PLATE.test(regNumber)) {
+      return res.status(400).json({ error: 'Invalid registration number format (e.g. KL32L2011 or 22BH1234A)' });
+    }
     let vehicle = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regNumber);
 
     // If vehicle exists in DB with valid brand or model, return it immediately
     if (vehicle && (vehicle.brand || vehicle.model)) {
       if (vehicle.customer_id) {
         const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(vehicle.customer_id);
-        if (customer && customer.phone) {
-          vehicle.phone = customer.phone;
+        if (customer) {
+          if (customer.phone) vehicle.phone = customer.phone;
+          if (customer.name) vehicle.customer_name = customer.name;
         }
       }
       return res.json(vehicle);
@@ -61,11 +67,19 @@ router.get('/lookup/:regNumber', async (req, res) => {
 // Manually correct a vehicle's details
 router.put('/:id', async (req, res) => {
   try {
+    const rawId = req.params.id;
+    if (!rawId || rawId === 'null' || rawId === 'undefined') {
+      return res.json({ message: 'No valid vehicle ID provided' });
+    }
+    const vehicleId = parseInt(rawId);
+    if (isNaN(vehicleId)) {
+      return res.json({ message: 'Invalid vehicle ID' });
+    }
     const { brand, model, segment, color } = req.body;
     await db.prepare('UPDATE vehicles SET brand=?, model=?, segment=?, color=? WHERE id=?')
-      .run(brand, model, segment, color, req.params.id);
-    const updated = await db.prepare('SELECT * FROM vehicles WHERE id=?').get(req.params.id);
-    res.json(updated);
+      .run(brand, model, segment, color, vehicleId);
+    const updated = await db.prepare('SELECT * FROM vehicles WHERE id=?').get(vehicleId);
+    res.json(updated || { id: vehicleId, brand, model, segment, color });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

@@ -23,11 +23,13 @@ if (usePostgres) {
       const pgSql = convertSql(sql);
       return {
         async get(...args) {
-          const res = await pool.query(pgSql, args.flat());
+          const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);
+          const res = await pool.query(pgSql, cleanArgs);
           return res.rows[0] || null;
         },
         async all(...args) {
-          const res = await pool.query(pgSql, args.flat());
+          const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);
+          const res = await pool.query(pgSql, cleanArgs);
           return res.rows;
         },
         async run(...args) {
@@ -37,7 +39,8 @@ if (usePostgres) {
             query += ' RETURNING id';
           }
           try {
-            const res = await pool.query(query, args.flat());
+            const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);
+            const res = await pool.query(query, cleanArgs);
             const lastInsertRowid = (res.rows[0] && res.rows[0].id) ? res.rows[0].id : null;
             return { lastInsertRowid, changes: res.rowCount };
           } catch (err) {
@@ -52,6 +55,12 @@ if (usePostgres) {
       return pool.query(sql);
     }
   };
+
+  pool.query(`
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_name TEXT;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS before_photos TEXT;
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT;
+  `).catch(err => console.error("Postgres migration error:", err.message));
 
   module.exports = db;
 
@@ -71,13 +80,17 @@ if (usePostgres) {
     CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, reg_number TEXT UNIQUE NOT NULL, brand TEXT, model TEXT, segment TEXT, color TEXT, customer_id INTEGER);
     CREATE TABLE IF NOT EXISTS wash_types (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
     CREATE TABLE IF NOT EXISTS pricing (id INTEGER PRIMARY KEY AUTOINCREMENT, wash_type_id INTEGER NOT NULL, segment TEXT NOT NULL, price REAL NOT NULL, UNIQUE(wash_type_id, segment));
-    CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER NOT NULL DEFAULT 1, vehicle_id INTEGER NOT NULL, wash_type_id INTEGER NOT NULL, entry_time TEXT NOT NULL, exit_time TEXT, eta_minutes INTEGER DEFAULT 30, status TEXT NOT NULL DEFAULT 'in_progress', has_chain_lube INTEGER DEFAULT 0, chain_lube_price REAL DEFAULT 0, customer_type TEXT DEFAULT 'normal', workshop_id INTEGER, payment_status TEXT DEFAULT 'unsettled');
+    CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER NOT NULL DEFAULT 1, vehicle_id INTEGER NOT NULL, wash_type_id INTEGER NOT NULL, entry_time TEXT NOT NULL, exit_time TEXT, eta_minutes INTEGER DEFAULT 30, status TEXT NOT NULL DEFAULT 'in_progress', has_chain_lube INTEGER DEFAULT 0, chain_lube_price REAL DEFAULT 0, customer_type TEXT DEFAULT 'normal', workshop_id INTEGER, payment_status TEXT DEFAULT 'unsettled', customer_name TEXT, before_photos TEXT);
     CREATE TABLE IF NOT EXISTS bills (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER UNIQUE NOT NULL, amount REAL NOT NULL, discount_amount REAL NOT NULL DEFAULT 0, final_amount REAL NOT NULL, payment_method TEXT, reward_points_earned INTEGER NOT NULL DEFAULT 0, reward_points_redeemed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'unpaid', paid_at TEXT);
     CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER NOT NULL DEFAULT 1, category TEXT NOT NULL, amount REAL NOT NULL, note TEXT, date TEXT NOT NULL, payment_method TEXT DEFAULT 'gpay');
     CREATE TABLE IF NOT EXISTS daily_opening_balances (date TEXT PRIMARY KEY, opening_cash REAL NOT NULL DEFAULT 0, opening_gpay REAL NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS workshops (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, address TEXT, phone TEXT, owner_name TEXT, owner_phone TEXT, type TEXT NOT NULL DEFAULT 'Car Workshop', created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS workshop_pricing (id INTEGER PRIMARY KEY AUTOINCREMENT, workshop_id INTEGER, wash_type_id INTEGER NOT NULL, segment TEXT NOT NULL, price REAL NOT NULL, UNIQUE(workshop_id, wash_type_id, segment));
   `);
+
+  try { db.exec('ALTER TABLE jobs ADD COLUMN customer_name TEXT'); } catch(e){}
+  try { db.exec('ALTER TABLE jobs ADD COLUMN before_photos TEXT'); } catch(e){}
+  try { db.exec('ALTER TABLE customers ADD COLUMN name TEXT'); } catch(e){}
 
   module.exports = db;
 }

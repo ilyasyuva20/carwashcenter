@@ -1,10 +1,37 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 
 function nowISO() {
   return new Date().toISOString();
 }
+
+const uploadsDir = path.join(__dirname, '../uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || '.jpg';
+    const safeName = `before-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    cb(null, safeName);
+  }
+});
+const upload = multer({ storage });
+
+router.post('/upload-before-photo', upload.single('photo'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
+    res.json({ url: `/uploads/${req.file.filename}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 async function getJobFull(id) {
   const job = await db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
@@ -15,16 +42,30 @@ async function getJobFull(id) {
     if (customer && customer.phone) {
       vehicle.phone = customer.phone;
     }
+    if (customer && customer.name && !job.customer_name) {
+      job.customer_name = customer.name;
+    }
   }
+
+  let beforePhotosArr = [];
+  if (job.before_photos) {
+    try {
+      beforePhotosArr = typeof job.before_photos === 'string' ? JSON.parse(job.before_photos) : job.before_photos;
+    } catch(e) {
+      beforePhotosArr = [];
+    }
+  }
+
   let washPrice = 0;
   const segment = vehicle ? vehicle.segment : '';
 
   if (job.customer_type === 'workshop') {
     // 1. Try specific workshop pricing
     let wpObj = null;
-    if (job.workshop_id) {
+    const cleanWId = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
+    if (cleanWId) {
       wpObj = await db.prepare('SELECT price FROM workshop_pricing WHERE workshop_id = ? AND wash_type_id = ? AND segment = ?')
-        .get(job.workshop_id, job.wash_type_id, segment);
+        .get(cleanWId, job.wash_type_id, segment);
     }
     // 2. Try default workshop pricing
     if (!wpObj) {
@@ -48,14 +89,17 @@ async function getJobFull(id) {
   const totalPrice = washPrice + lubePrice;
 
   let workshop = null;
-  if (job.workshop_id) {
-    workshop = await db.prepare('SELECT * FROM workshops WHERE id = ?').get(job.workshop_id);
+  const cleanWIdForSelect = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
+  if (cleanWIdForSelect) {
+    workshop = await db.prepare('SELECT * FROM workshops WHERE id = ?').get(cleanWIdForSelect);
   }
 
   const washType = await db.prepare('SELECT * FROM wash_types WHERE id = ?').get(job.wash_type_id);
   const bill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
   return {
     ...job,
+    customer_name: job.customer_name || '',
+    before_photos: beforePhotosArr,
     vehicle,
     wash_type: washType,
     price: totalPrice,
@@ -66,7 +110,7 @@ async function getJobFull(id) {
   };
 }
 
-// Create a job. Body: { reg_number, wash_type_id, eta_minutes, phone, has_chain_lube, chain_lube_price, customer_type, workshop_id, payment_status }
+// Create a job. Body: { reg_number, wash_type_id, eta_minutes, phone, customer_name, before_photos, has_chain_lube, chain_lube_price, customer_type, workshop_id, payment_status }
 router.post('/', async (req, res) => {
   try {
     const {
@@ -74,6 +118,8 @@ router.post('/', async (req, res) => {
       wash_type_id,
       eta_minutes,
       phone,
+      customer_name,
+      before_photos,
       has_chain_lube,
       chain_lube_price,
       customer_type,
@@ -81,7 +127,23 @@ router.post('/', async (req, res) => {
       payment_status
     } = req.body;
 
-    const regNumber = reg_number.toUpperCase().replace(/\s+/g, '');
+    if (!reg_number) {
+      return res.status(400).json({ error: 'Registration number is required' });
+    }
+
+    const cleanWashTypeId = (wash_type_id && wash_type_id !== 'null' && !isNaN(Number(wash_type_id)))
+      ? Number(wash_type_id)
+      : null;
+
+    if (!cleanWashTypeId) {
+      return res.status(400).json({ error: 'Please select a valid wash package' });
+    }
+
+    const REGEX_PLATE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$|^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$/;
+    const regNumber = reg_number.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!REGEX_PLATE.test(regNumber)) {
+      return res.status(400).json({ error: 'Invalid registration number format (e.g. KL32L2011 or 22BH1234A)' });
+    }
     let vehicle = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regNumber);
     if (!vehicle) {
       const result = await db.prepare(
@@ -90,24 +152,35 @@ router.post('/', async (req, res) => {
       vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(result.lastInsertRowid);
     }
 
+    const custName = customer_name ? customer_name.trim() : null;
+
     if (phone) {
       let customer = await db.prepare('SELECT * FROM customers WHERE phone = ?').get(phone);
       if (!customer) {
-        const info = await db.prepare('INSERT INTO customers (phone) VALUES (?)').run(phone);
+        const info = await db.prepare('INSERT INTO customers (phone, name) VALUES (?, ?)').run(phone, custName);
         customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(info.lastInsertRowid);
+      } else if (custName) {
+        await db.prepare('UPDATE customers SET name = ? WHERE id = ?').run(custName, customer.id);
       }
       await db.prepare('UPDATE vehicles SET customer_id = ? WHERE id = ?').run(customer.id, vehicle.id);
     }
 
     const chainLube = has_chain_lube ? 1 : 0;
-    const lubePrice = has_chain_lube ? (chain_lube_price || 150) : 0;
+    const lubePrice = has_chain_lube ? (Number(chain_lube_price) || 150) : 0;
     const custType = customer_type === 'workshop' ? 'workshop' : 'normal';
-    const wId = custType === 'workshop' && workshop_id ? Number(workshop_id) : null;
+    const wId = (custType === 'workshop' && workshop_id && workshop_id !== 'null' && !isNaN(Number(workshop_id)))
+      ? Number(workshop_id)
+      : null;
     const payStatus = payment_status === 'settled' ? 'settled' : 'unsettled';
 
+    let photosJson = null;
+    if (before_photos && Array.isArray(before_photos) && before_photos.length > 0) {
+      photosJson = JSON.stringify(before_photos);
+    }
+
     const info = await db.prepare(
-      'INSERT INTO jobs (vehicle_id, wash_type_id, entry_time, eta_minutes, status, has_chain_lube, chain_lube_price, customer_type, workshop_id, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(vehicle.id, wash_type_id, nowISO(), eta_minutes || 30, 'in_progress', chainLube, lubePrice, custType, wId, payStatus);
+      'INSERT INTO jobs (vehicle_id, wash_type_id, entry_time, eta_minutes, status, has_chain_lube, chain_lube_price, customer_type, workshop_id, payment_status, customer_name, before_photos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(vehicle.id, cleanWashTypeId, nowISO(), Number(eta_minutes) || 30, 'in_progress', chainLube, lubePrice, custType, wId, payStatus, custName, photosJson);
 
     const fullJob = await getJobFull(info.lastInsertRowid);
     res.json(fullJob);
