@@ -27,7 +27,10 @@ const upload = multer({ storage });
 router.post('/upload-before-photo', upload.single('photo'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
-    res.json({ url: `/uploads/${req.file.filename}` });
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+    const host = req.headers['x-forwarded-host'] || req.get('host') || 'carwashapp-xwz9.onrender.com';
+    const fullUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+    res.json({ url: fullUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -50,7 +53,15 @@ async function getJobFull(id) {
   let beforePhotosArr = [];
   if (job.before_photos) {
     try {
-      beforePhotosArr = typeof job.before_photos === 'string' ? JSON.parse(job.before_photos) : job.before_photos;
+      const rawArr = typeof job.before_photos === 'string' ? JSON.parse(job.before_photos) : job.before_photos;
+      if (Array.isArray(rawArr)) {
+        beforePhotosArr = rawArr.map(url => {
+          if (typeof url === 'string' && url.startsWith('/uploads/')) {
+            return `https://carwashapp-xwz9.onrender.com${url}`;
+          }
+          return url;
+        });
+      }
     } catch(e) {
       beforePhotosArr = [];
     }
