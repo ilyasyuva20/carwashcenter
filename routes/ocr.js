@@ -62,49 +62,42 @@ function parsePlateFromText(rawText) {
   if (!rawText) return '';
   const textUpper = rawText.toUpperCase();
   
-  // Extract and clean individual lines
   const lines = textUpper
     .split(/[\r\n]+/)
     .map(l => l.replace(/[^A-Z0-9]/g, ''))
     .filter(Boolean);
 
-  // Filter out noise watermarks and brand text
-  const plateLinesOnly = lines.filter(l => l !== 'IND' && l !== 'INDIA' && l !== 'HERO' && l !== 'HONDA' && l !== 'ATHER' && l !== 'PALAL' && l !== 'MOBILITY');
-
-  // 1. Check individual lines for exact plate
-  for (const line of plateLinesOnly) {
+  // 1. Direct line match or repaired line match
+  for (const line of lines) {
     let lm = line.match(PLATE_REGEX_SEARCH);
     if (lm) return lm[0];
+
+    let rep = repairPlateString(line);
+    if (PLATE_REGEX_STRICT.test(rep)) return rep;
   }
 
-  // 2. Check multi-line combinations (e.g. 2-line scooter plate KL43 \n S9064 -> KL43S9064)
+  // 2. Multi-line combinations repaired (filtering watermark words)
+  const plateLinesOnly = lines.filter(l => l !== 'IND' && l !== 'INDIA' && l !== 'HERO' && l !== 'HONDA' && l !== 'ATHER' && l !== 'PALAL' && l !== 'MOBILITY');
   for (let i = 0; i < plateLinesOnly.length - 1; i++) {
     const combined = plateLinesOnly[i] + plateLinesOnly[i + 1];
     let cm = combined.match(PLATE_REGEX_SEARCH);
     if (cm) return cm[0];
 
+    let rep = repairPlateString(combined);
+    if (PLATE_REGEX_STRICT.test(rep)) return rep;
+
     if (i < plateLinesOnly.length - 2) {
       const combined3 = plateLinesOnly[i] + plateLinesOnly[i + 1] + plateLinesOnly[i + 2];
       let cm3 = combined3.match(PLATE_REGEX_SEARCH);
       if (cm3) return cm3[0];
+
+      let rep3 = repairPlateString(combined3);
+      if (PLATE_REGEX_STRICT.test(rep3)) return rep3;
     }
   }
 
-  // 3. Check combined text of valid plate lines
+  // 3. Fallback 4-digit number extraction
   const combinedPlateText = plateLinesOnly.join('');
-  let m = combinedPlateText.match(PLATE_REGEX_SEARCH);
-  if (m) return m[0];
-
-  // 4. Position Repair on 8-11 character chunks
-  const chunks = combinedPlateText.match(/[A-Z0-9]{8,11}/g) || [];
-  for (const chunk of chunks) {
-    const repaired = repairPlateString(chunk);
-    if (PLATE_REGEX_STRICT.test(repaired)) {
-      return repaired;
-    }
-  }
-
-  // 5. Fallback 4-digit number extraction
   const partialWithState = combinedPlateText.match(/[A-Z]{2}[0-9]{0,4}[0-9]{4}/);
   if (partialWithState) return partialWithState[0];
 
