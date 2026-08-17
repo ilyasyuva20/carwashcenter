@@ -30,16 +30,26 @@ router.get('/lookup/:regNumber', async (req, res) => {
     const info = await lookupVehicle(regNumber);
 
     if (info && !info.not_found && (info.brand || info.model)) {
+      console.log(`[Vehicle Lookup Success]: Received live vehicle data via [${info.source}]`);
+      console.log(`  ├─ Registration: ${info.reg_number}`);
+      console.log(`  ├─ Brand: ${info.brand}`);
+      console.log(`  ├─ Model: ${info.model}`);
+      console.log(`  ├─ Color: ${info.color}`);
+      console.log(`  ├─ Year: ${info.year}`);
+      console.log(`  └─ Segment: ${info.segment}`);
+
       if (vehicle) {
         await db.prepare(
-          'UPDATE vehicles SET brand = ?, model = ?, segment = ?, color = ? WHERE id = ?'
-        ).run(info.brand, info.model, info.segment, info.color, vehicle.id);
+          'UPDATE vehicles SET brand = ?, model = ?, segment = ?, color = ?, year = ? WHERE id = ?'
+        ).run(info.brand, info.model, info.segment, info.color, info.year || '', vehicle.id);
         vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(vehicle.id);
+        console.log(`[Database Update]: Updated vehicle ID ${vehicle.id} with new details.`);
       } else {
         const result = await db.prepare(
-          'INSERT INTO vehicles (reg_number, brand, model, segment, color) VALUES (?, ?, ?, ?, ?)'
-        ).run(regNumber, info.brand, info.model, info.segment, info.color);
+          'INSERT INTO vehicles (reg_number, brand, model, segment, color, year) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(regNumber, info.brand, info.model, info.segment, info.color, info.year || '');
         vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(result.lastInsertRowid);
+        console.log(`[Database Insert]: Saved new vehicle ID ${vehicle.id} to database.`);
       }
       vehicle.source = info.source;
       return res.json(vehicle);
@@ -54,6 +64,7 @@ router.get('/lookup/:regNumber', async (req, res) => {
       model: vehicle?.model || '',
       segment: vehicle?.segment || 'hatchback',
       color: vehicle?.color || '',
+      year: vehicle?.year || '',
       customer_id: vehicle?.customer_id || null,
       phone: phone || '',
       source: 'manual-entry',
@@ -75,11 +86,11 @@ router.put('/:id', async (req, res) => {
     if (isNaN(vehicleId)) {
       return res.json({ message: 'Invalid vehicle ID' });
     }
-    const { brand, model, segment, color } = req.body;
-    await db.prepare('UPDATE vehicles SET brand=?, model=?, segment=?, color=? WHERE id=?')
-      .run(brand, model, segment, color, vehicleId);
+    const { brand, model, segment, color, year } = req.body;
+    await db.prepare('UPDATE vehicles SET brand=?, model=?, segment=?, color=?, year=? WHERE id=?')
+      .run(brand, model, segment, color, year || '', vehicleId);
     const updated = await db.prepare('SELECT * FROM vehicles WHERE id=?').get(vehicleId);
-    res.json(updated || { id: vehicleId, brand, model, segment, color });
+    res.json(updated || { id: vehicleId, brand, model, segment, color, year });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

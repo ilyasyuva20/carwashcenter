@@ -141,15 +141,19 @@ async function scrapeVehicleDetails(regNumber) {
     // Evaluate scraped fields from page structure
     const details = await page.evaluate(() => {
       const getText = (selector) => {
-        const el = document.querySelector(selector);
-        return el ? el.innerText.trim() : '';
+        try {
+          const el = document.querySelector(selector);
+          return el ? el.innerText.trim() : '';
+        } catch (e) {
+          return '';
+        }
       };
 
       return {
-        brand: getText('.maker-name, .brand, td:contains("Maker") + td, .vehicle-maker') || '',
-        model: getText('.model-name, .model, td:contains("Model") + td, .vehicle-model') || '',
-        vehicleClass: getText('.vehicle-class, td:contains("Class") + td') || '',
-        color: getText('.vehicle-color, td:contains("Color") + td') || ''
+        brand: getText('.maker-name, .brand, .vehicle-maker') || '',
+        model: getText('.model-name, .model, .vehicle-model') || '',
+        vehicleClass: getText('.vehicle-class') || '',
+        color: getText('.vehicle-color') || ''
       };
     });
 

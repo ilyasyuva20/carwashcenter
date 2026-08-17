@@ -60,6 +60,7 @@ if (usePostgres) {
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_name TEXT;
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS before_photos TEXT;
     ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT;
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS year TEXT;
   `).catch(err => console.error("Postgres migration error:", err.message));
 
   module.exports = db;
@@ -77,7 +78,7 @@ if (usePostgres) {
     CREATE TABLE IF NOT EXISTS advances (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, date TEXT NOT NULL, amount REAL NOT NULL, note TEXT, payment_method TEXT DEFAULT 'cash');
     CREATE TABLE IF NOT EXISTS payroll (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, month INTEGER NOT NULL, year INTEGER NOT NULL, base_salary REAL DEFAULT 0, present_days REAL DEFAULT 0, leave_days REAL DEFAULT 0, late_deduction REAL DEFAULT 0, overtime_pay REAL DEFAULT 0, advance_deduction REAL DEFAULT 0, net_pay REAL NOT NULL, paid_date TEXT, generated_at TEXT, UNIQUE(employee_id, month, year));
     CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT UNIQUE, name TEXT, reward_points INTEGER NOT NULL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, reg_number TEXT UNIQUE NOT NULL, brand TEXT, model TEXT, segment TEXT, color TEXT, customer_id INTEGER);
+    CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, reg_number TEXT UNIQUE NOT NULL, brand TEXT, model TEXT, segment TEXT, color TEXT, year TEXT, customer_id INTEGER);
     CREATE TABLE IF NOT EXISTS wash_types (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
     CREATE TABLE IF NOT EXISTS pricing (id INTEGER PRIMARY KEY AUTOINCREMENT, wash_type_id INTEGER NOT NULL, segment TEXT NOT NULL, price REAL NOT NULL, UNIQUE(wash_type_id, segment));
     CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER NOT NULL DEFAULT 1, vehicle_id INTEGER NOT NULL, wash_type_id INTEGER NOT NULL, entry_time TEXT NOT NULL, exit_time TEXT, eta_minutes INTEGER DEFAULT 30, status TEXT NOT NULL DEFAULT 'in_progress', has_chain_lube INTEGER DEFAULT 0, chain_lube_price REAL DEFAULT 0, customer_type TEXT DEFAULT 'normal', workshop_id INTEGER, payment_status TEXT DEFAULT 'unsettled', customer_name TEXT, before_photos TEXT);
@@ -91,6 +92,7 @@ if (usePostgres) {
   try { db.exec('ALTER TABLE jobs ADD COLUMN customer_name TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE jobs ADD COLUMN before_photos TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE customers ADD COLUMN name TEXT'); } catch(e){}
+  try { db.exec('ALTER TABLE vehicles ADD COLUMN year TEXT'); } catch(e){}
 
   module.exports = db;
 }

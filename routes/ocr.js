@@ -62,16 +62,43 @@ function repairPlateString(str) {
   return clean;
 }
 
+const NOISE_WORDS = [
+  'IND', 'INDIA', 'HERO', 'HONDA', 'ATHER', 'PALAL', 'MOBILITY', 'DEALER',
+  'MOTORS', 'SUZUKI', 'MARUTI', 'HYUNDAI', 'TATA', 'YAMAHA', 'ENFIELD', 'KTM',
+  'BAJAJ', 'VESPA', 'TVS', 'CHEVROLET', 'FORD', 'TOYOTA', 'VOLKSWAGEN', 'BMW',
+  'BENZ', 'AUDI', 'NISSAN', 'MG', 'KIA', 'JEEP', 'RENAULT', 'MAHINDRA', 'SKODA',
+  'NEXA', 'CAR', 'BIKE', 'EV', 'AUTO', 'GARAGE', 'WORKSHOP', 'SERVICE'
+];
+
+function cleanNoiseFromText(rawText) {
+  let cleaned = (rawText || '').toUpperCase();
+  for (const word of NOISE_WORDS) {
+    const regex = new RegExp('\\b' + word + '\\b', 'g');
+    cleaned = cleaned.replace(regex, '');
+  }
+  return cleaned;
+}
+
 function parsePlateFromText(rawText) {
   if (!rawText) return '';
   const textUpper = rawText.toUpperCase();
-  
-  const lines = textUpper
+
+  // 1. Direct regex search on whole un-cleaned text
+  const cleanUnprocessed = textUpper.replace(/[^A-Z0-9]/g, '');
+  let directMatch = cleanUnprocessed.match(PLATE_REGEX_SEARCH);
+  if (directMatch) {
+    let rep = repairPlateString(directMatch[0]);
+    if (PLATE_REGEX_STRICT.test(rep)) return rep;
+  }
+
+  // 2. Clean out noise frame words first
+  const cleanedText = cleanNoiseFromText(rawText);
+  const lines = cleanedText
     .split(/[\r\n]+/)
     .map(l => l.replace(/[^A-Z0-9]/g, ''))
     .filter(Boolean);
 
-  // 1. Direct line match or repaired line match
+  // 3. Direct line match or repaired line match
   for (const line of lines) {
     let rep = repairPlateString(line);
     if (PLATE_REGEX_STRICT.test(rep)) {
@@ -86,38 +113,45 @@ function parsePlateFromText(rawText) {
     }
   }
 
-  // 2. Multi-line combinations repaired
-  const plateLinesOnly = lines.filter(l => l !== 'IND' && l !== 'INDIA' && l !== 'HERO' && l !== 'HONDA' && l !== 'ATHER' && l !== 'PALAL' && l !== 'MOBILITY');
-  for (let i = 0; i < plateLinesOnly.length - 1; i++) {
-    const combined = plateLinesOnly[i] + plateLinesOnly[i + 1];
-    let rep = repairPlateString(combined);
-    if (PLATE_REGEX_STRICT.test(rep)) return rep;
+  // 4. Try all pairs of lines (including non-adjacent and reversed for 2-line plates)
+  for (let i = 0; i < lines.length; i++) {
+    for (let j = 0; j < lines.length; j++) {
+      if (i === j) continue;
+      const combined = lines[i] + lines[j];
+      let rep = repairPlateString(combined);
+      if (PLATE_REGEX_STRICT.test(rep)) return rep;
 
-    let cm = combined.match(PLATE_REGEX_SEARCH);
-    if (cm) {
-      const repCm = repairPlateString(cm[0]);
-      if (PLATE_REGEX_STRICT.test(repCm)) return repCm;
-    }
-
-    if (i < plateLinesOnly.length - 2) {
-      const combined3 = plateLinesOnly[i] + plateLinesOnly[i + 1] + plateLinesOnly[i + 2];
-      let rep3 = repairPlateString(combined3);
-      if (PLATE_REGEX_STRICT.test(rep3)) return rep3;
-
-      let cm3 = combined3.match(PLATE_REGEX_SEARCH);
-      if (cm3) {
-        const repCm3 = repairPlateString(cm3[0]);
-        if (PLATE_REGEX_STRICT.test(repCm3)) return repCm3;
+      let cm = combined.match(PLATE_REGEX_SEARCH);
+      if (cm) {
+        const repCm = repairPlateString(cm[0]);
+        if (PLATE_REGEX_STRICT.test(repCm)) return repCm;
       }
     }
   }
 
-  // 3. Fallback 4-digit number extraction
-  const combinedPlateText = plateLinesOnly.join('');
-  const partialWithState = combinedPlateText.match(/[A-Z]{2}[0-9]{0,4}[0-9]{4}/);
+  // 5. Try 3-line combinations
+  for (let i = 0; i < lines.length; i++) {
+    for (let j = 0; j < lines.length; j++) {
+      if (i === j) continue;
+      for (let k = 0; k < lines.length; k++) {
+        if (k === i || k === j) continue;
+        const combined3 = lines[i] + lines[j] + lines[k];
+        let rep3 = repairPlateString(combined3);
+        if (PLATE_REGEX_STRICT.test(rep3)) return rep3;
+      }
+    }
+  }
+
+  // 6. Join ALL lines together without noise words
+  const allJoined = lines.join('');
+  let repAll = repairPlateString(allJoined);
+  if (PLATE_REGEX_STRICT.test(repAll)) return repAll;
+
+  // 7. Fallback 4-digit match
+  const partialWithState = allJoined.match(/[A-Z]{2}[0-9]{0,4}[0-9]{4}/);
   if (partialWithState) return partialWithState[0];
 
-  const fourDigit = combinedPlateText.match(FOUR_DIGIT_REGEX);
+  const fourDigit = allJoined.match(FOUR_DIGIT_REGEX);
   if (fourDigit) return fourDigit[0];
 
   return '';
