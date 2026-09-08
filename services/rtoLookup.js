@@ -45,7 +45,7 @@ function normalizeCategory(vehicleClass = '', modelName = '', brandName = '', is
   if (
     cls.includes('SCOOTER') || cls.includes('SCOOTY') || mdl.includes('ACTIVA') ||
     mdl.includes('JUPITER') || mdl.includes('ACCESS') || mdl.includes('NTORQ') ||
-    mdl.includes('VESPA') || mdl.includes('BURGMAM') || mdl.includes('BURGMAN') ||
+    mdl.includes('VESPA') || mdl.includes('BURGMAN') || mdl.includes('SWISH') ||
     mdl.includes('DIO') || mdl.includes('PLEASURE') || mdl.includes('MAESTRO') ||
     mdl.includes('DESTINI') || mdl.includes('FASCINO') || mdl.includes('RAY') ||
     mdl.includes('AEROX') || mdl.includes('CHETAK') || mdl.includes('OLA') ||
@@ -275,57 +275,52 @@ async function fetchFromRapidAPI(regNumber) {
     return null;
   }
 
-  // Try standard GET query formats: ?reg_no=, ?rc=, ?registration_number=
-  const urlParams = [`reg_no=${encodeURIComponent(regNumber)}`, `rc=${encodeURIComponent(regNumber)}`, `reg_number=${encodeURIComponent(regNumber)}` ];
-  
-  for (const param of urlParams) {
-    try {
-      const apiUrl = `https://${apiHost}/?${param}`;
-      console.log(`[RapidAPI]: Querying https://${apiHost}/?${param}...`);
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-          'x-rapidapi-key': apiKey,
-          'x-rapidapi-host': apiHost,
-          'Accept': 'application/json'
-        }
-      });
-
-      if (!response.ok) {
-        continue;
+  try {
+    const apiUrl = `https://${apiHost}/rc_v2.php?registration_no=${encodeURIComponent(regNumber)}`;
+    console.log(`[RapidAPI]: Querying ${apiUrl}...`);
+    const response = await fetch(apiUrl, {
+      method: 'GET',
+      headers: {
+        'x-rapidapi-key': apiKey,
+        'x-rapidapi-host': apiHost,
+        'Accept': 'application/json'
       }
+    });
 
-      const json = await response.json();
-      const vData = json?.data || json?.result || json?.response || json;
-
-      if (!vData || (json.status && json.status !== 'success' && json.status !== true && json.status !== 200)) {
-        continue;
-      }
-
-      const vehicleClass = vData.vehicle_category_description || vData.vehicle_category || vData.vehicle_class || vData.body_type || vData.class || '';
-      const makerName = vData.makeData?.v_make_name || vData.maker_description || vData.maker_name || vData.maker || vData.brand || '';
-      const modelName = vData.maker_model || vData.model_name || vData.model || '';
-      const colorName = vData.color || vData.vehicle_color || 'White';
-      const yearVal = extractYear(vData.reg_date || vData.registration_date || vData.manufacture_year || vData.manufacturing_date || vData.reg_year || '');
-      const brand = cleanBrandName(makerName);
-      const isScooterFlag = vData.makeData?.is_scooter === 1 || vData.makeData?.only_scooter === 1;
-
-      if (brand || modelName) {
-        console.log(`[RapidAPI SUCCESS]: Found details for ${regNumber} -> ${brand} ${modelName}`);
-        return {
-          reg_number: regNumber.toUpperCase(),
-          brand: brand || 'Vehicle',
-          model: modelName || 'Model',
-          segment: normalizeCategory(vehicleClass, modelName, brand, isScooterFlag),
-          color: colorName,
-          year: yearVal || '',
-          source: 'vahan-rapidapi',
-          not_found: false
-        };
-      }
-    } catch (err) {
-      console.warn(`[RapidAPI Warning (${param})]: ${err.message}`);
+    if (!response.ok) {
+      console.warn(`[RapidAPI Warning]: HTTP ${response.status}`);
+      return null;
     }
+
+    const json = await response.json();
+    const vData = json?.other?.raw?.rc_details || json?.details || json?.data || json?.result || json?.response || json;
+    if (!vData) return null;
+
+    const combinedMakerModel = vData.makerModel || '';
+    const [combinedBrand, ...combinedModelParts] = combinedMakerModel.split(',');
+    const vehicleClass = vData.rc_vh_class_desc || vData.rc_body_type_desc || vData.vehicle_category_description || vData.vehicle_category || vData.vehicle_class || vData.vehicleClass || vData.body_type || vData.class || '';
+    const makerName = vData.rc_maker_desc || vData.makeData?.v_make_name || vData.maker_description || vData.maker_name || vData.maker || vData.brand || combinedBrand || '';
+    const modelName = vData.rc_maker_model || vData.maker_model || vData.model_name || vData.model || combinedModelParts.join(',').trim() || '';
+    const colorName = vData.rc_color || vData.color || vData.vehicle_color || vData.vehicleColor || 'White';
+    const yearVal = extractYear(vData.rc_regn_dt || vData.reg_date || vData.registration_date || vData.registrationDate || vData.manufacture_year || vData.manufacturing_date || vData.reg_year || '');
+    const brand = cleanBrandName(makerName);
+    const isScooterFlag = vData.makeData?.is_scooter === 1 || vData.makeData?.only_scooter === 1;
+
+    if (brand || modelName) {
+      console.log(`[RapidAPI SUCCESS]: Found details for ${regNumber} -> ${brand} ${modelName}`);
+      return {
+        reg_number: regNumber.toUpperCase(),
+        brand: brand || 'Vehicle',
+        model: modelName || 'Model',
+        segment: normalizeCategory(vehicleClass, modelName, brand, isScooterFlag),
+        color: colorName,
+        year: yearVal || '',
+        source: 'vahan-rapidapi',
+        not_found: false
+      };
+    }
+  } catch (err) {
+    console.warn(`[RapidAPI Warning]: ${err.message}`);
   }
 
   return null;

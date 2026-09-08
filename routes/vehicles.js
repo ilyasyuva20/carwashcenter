@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { lookupVehicle } = require('../services/rtoLookup');
+const { lookupVehicle, normalizeCategory } = require('../services/rtoLookup');
 
 const REGEX_PLATE = /^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$|^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$/;
 
@@ -14,8 +14,16 @@ router.get('/lookup/:regNumber', async (req, res) => {
     }
     let vehicle = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regNumber);
 
-    // If vehicle exists in DB with valid brand or model, return it immediately
-    if (vehicle && (vehicle.brand || vehicle.model)) {
+    // Use the cached vehicle when the core details are already complete.
+    // Active jobs reference this same vehicle row, so they are cached too.
+    if (vehicle && vehicle.brand && vehicle.model && vehicle.color) {
+      const correctedSegment = vehicle.segment === 'hatchback'
+        ? normalizeCategory('', vehicle.model, vehicle.brand)
+        : vehicle.segment;
+      if (correctedSegment !== vehicle.segment) {
+        await db.prepare('UPDATE vehicles SET segment = ? WHERE id = ?').run(correctedSegment, vehicle.id);
+        vehicle.segment = correctedSegment;
+      }
       if (vehicle.customer_id) {
         const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(vehicle.customer_id);
         if (customer) {
@@ -23,6 +31,7 @@ router.get('/lookup/:regNumber', async (req, res) => {
           if (customer.name) vehicle.customer_name = customer.name;
         }
       }
+      vehicle.source = 'database';
       return res.json(vehicle);
     }
 

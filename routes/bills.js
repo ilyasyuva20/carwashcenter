@@ -16,7 +16,7 @@ router.get('/pdf/:jobId', async (req, res) => {
 
     const isPaid = job.payment_status === 'settled' || (job.bill && job.bill.status === 'paid');
     const payMethod = (job.bill?.payment_method || 'CASH').toUpperCase();
-    const completedVal = job.exit_time || job.completed_at || job.entry_time;
+    const completedVal = job.bill?.paid_at || job.exit_time || job.completed_at || job.entry_time;
     const d = completedVal ? new Date(completedVal) : new Date();
     const dateOnlyStr = d.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
     const timeOnlyStr = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase();
@@ -284,7 +284,7 @@ router.get('/preview/:jobId', async (req, res) => {
 // Create + pay a bill. Body: { job_id, payment_method: 'cash'|'gpay', redeem: bool }
 router.post('/', async (req, res) => {
   try {
-    const { job_id, payment_method, redeem } = req.body;
+    const { job_id, payment_method, redeem, paid_at } = req.body;
     const job = await getJobFull(job_id);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (job.price == null) return res.status(400).json({ error: 'No price configured for this segment/wash type' });
@@ -302,11 +302,15 @@ router.post('/', async (req, res) => {
       pointsRedeemed = REDEEM_THRESHOLD;
     }
     const finalAmount = Math.max(0, job.price - discount);
+    const paidAt = payment_method === 'gpay' && paid_at ? new Date(paid_at) : new Date();
+    if (Number.isNaN(paidAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid payment date and time' });
+    }
 
     const info = await db.prepare(`
       INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)
-    `).run(job.id, job.price, discount, finalAmount, payment_method, POINTS_PER_WASH, pointsRedeemed, new Date().toISOString());
+    `).run(job.id, job.price, discount, finalAmount, payment_method, POINTS_PER_WASH, pointsRedeemed, paidAt.toISOString());
 
     if (customer) {
       const newPoints = customer.reward_points - pointsRedeemed + POINTS_PER_WASH;
@@ -522,14 +526,18 @@ router.get('/workshop-summary', async (req, res) => {
 // Single job settlement endpoint
 router.post('/settle-job', async (req, res) => {
   try {
-    const { job_id, payment_method } = req.body;
+    const { job_id, payment_method, paid_at } = req.body;
     if (!job_id) return res.status(400).json({ error: 'job_id is required' });
 
     const job = await getJobFull(job_id);
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
     const payMethod = payment_method || 'cash';
-    const now = new Date().toISOString();
+    const paidAt = payMethod === 'gpay' && paid_at ? new Date(paid_at) : new Date();
+    if (Number.isNaN(paidAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid payment date and time' });
+    }
+    const now = paidAt.toISOString();
 
     await db.prepare("UPDATE jobs SET payment_status = 'settled' WHERE id = ?").run(job.id);
 

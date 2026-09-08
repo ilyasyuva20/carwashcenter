@@ -59,6 +59,7 @@ if (usePostgres) {
   pool.query(`
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_name TEXT;
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS before_photos TEXT;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offer_price REAL;
     ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT;
     ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS year TEXT;
   `).catch(err => console.error("Postgres migration error:", err.message));
@@ -91,6 +92,7 @@ if (usePostgres) {
 
   try { db.exec('ALTER TABLE jobs ADD COLUMN customer_name TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE jobs ADD COLUMN before_photos TEXT'); } catch(e){}
+  try { db.exec('ALTER TABLE jobs ADD COLUMN offer_price REAL'); } catch(e){}
   try { db.exec('ALTER TABLE customers ADD COLUMN name TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE vehicles ADD COLUMN year TEXT'); } catch(e){}
 

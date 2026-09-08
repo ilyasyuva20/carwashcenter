@@ -97,7 +97,9 @@ async function getJobFull(id) {
   }
 
   const lubePrice = job.has_chain_lube ? (Number(job.chain_lube_price) || 150) : 0;
-  const totalPrice = washPrice + lubePrice;
+  const totalPrice = job.offer_price !== null && job.offer_price !== undefined
+    ? Number(job.offer_price)
+    : washPrice + lubePrice;
 
   let workshop = null;
   const cleanWIdForSelect = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
@@ -121,7 +123,7 @@ async function getJobFull(id) {
   };
 }
 
-// Create a job. Body: { reg_number, wash_type_id, eta_minutes, phone, customer_name, before_photos, has_chain_lube, chain_lube_price, customer_type, workshop_id, payment_status }
+// Create a job. Body: { reg_number, wash_type_id, eta_minutes, phone, customer_name, before_photos, has_chain_lube, chain_lube_price, offer_price, customer_type, workshop_id, payment_status }
 router.post('/', async (req, res) => {
   try {
     const {
@@ -133,6 +135,7 @@ router.post('/', async (req, res) => {
       before_photos,
       has_chain_lube,
       chain_lube_price,
+      offer_price,
       customer_type,
       workshop_id,
       payment_status
@@ -178,6 +181,10 @@ router.post('/', async (req, res) => {
 
     const chainLube = has_chain_lube ? 1 : 0;
     const lubePrice = has_chain_lube ? (Number(chain_lube_price) || 150) : 0;
+    const parsedOfferPrice = Number(offer_price);
+    if (!Number.isFinite(parsedOfferPrice) || parsedOfferPrice < 0) {
+      return res.status(400).json({ error: 'A valid offer price is required' });
+    }
     const custType = customer_type === 'workshop' ? 'workshop' : 'normal';
     const wId = (custType === 'workshop' && workshop_id && workshop_id !== 'null' && !isNaN(Number(workshop_id)))
       ? Number(workshop_id)
@@ -190,8 +197,8 @@ router.post('/', async (req, res) => {
     }
 
     const info = await db.prepare(
-      'INSERT INTO jobs (vehicle_id, wash_type_id, entry_time, eta_minutes, status, has_chain_lube, chain_lube_price, customer_type, workshop_id, payment_status, customer_name, before_photos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(vehicle.id, cleanWashTypeId, nowISO(), Number(eta_minutes) || 30, 'in_progress', chainLube, lubePrice, custType, wId, payStatus, custName, photosJson);
+      'INSERT INTO jobs (vehicle_id, wash_type_id, entry_time, eta_minutes, status, has_chain_lube, chain_lube_price, offer_price, customer_type, workshop_id, payment_status, customer_name, before_photos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(vehicle.id, cleanWashTypeId, nowISO(), Number(eta_minutes) || 30, 'in_progress', chainLube, lubePrice, parsedOfferPrice, custType, wId, payStatus, custName, photosJson);
 
     const fullJob = await getJobFull(info.lastInsertRowid);
     res.json(fullJob);
