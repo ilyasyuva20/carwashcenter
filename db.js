@@ -62,6 +62,7 @@ if (usePostgres) {
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offer_price REAL;
     ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT;
     ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS year TEXT;
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS owner_name TEXT;
   `).catch(err => console.error("Postgres migration error:", err.message));
 
   module.exports = db;
@@ -95,6 +96,7 @@ if (usePostgres) {
   try { db.exec('ALTER TABLE jobs ADD COLUMN offer_price REAL'); } catch(e){}
   try { db.exec('ALTER TABLE customers ADD COLUMN name TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE vehicles ADD COLUMN year TEXT'); } catch(e){}
+  try { db.exec('ALTER TABLE vehicles ADD COLUMN owner_name TEXT'); } catch(e){}
 
   module.exports = db;
 }

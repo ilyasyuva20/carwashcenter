@@ -324,26 +324,34 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Get Normal Retail Customer Bills & Summary
+// Get Normal Retail Customer Bills & Summary, including jobs paid before completion.
 router.get('/', async (req, res) => {
   try {
     const { date, startDate, endDate, segment, payment_status, q } = req.query;
 
     let rawJobs = await db.prepare(`
-      SELECT id, entry_time, exit_time, payment_status 
-      FROM jobs 
-      WHERE (customer_type != 'workshop' OR customer_type IS NULL) 
-        AND status = 'completed'
-      ORDER BY id DESC
+      SELECT j.id, j.entry_time, j.exit_time, j.payment_status, b.status AS bill_status
+      FROM jobs j
+      LEFT JOIN bills b ON b.job_id = j.id
+      WHERE (j.customer_type != 'workshop' OR j.customer_type IS NULL)
+        AND (j.status = 'completed' OR j.payment_status = 'settled' OR b.status = 'paid')
+      ORDER BY j.id DESC
     `).all();
 
     if (startDate && endDate) {
       rawJobs = rawJobs.filter(j => {
         const d = (j.exit_time || j.entry_time || '').slice(0, 10);
+        const isPaid = j.payment_status === 'settled' || j.bill_status === 'paid';
+        if (!isPaid) return true;
         return d >= startDate && d <= endDate;
       });
     } else if (date) {
-      rawJobs = rawJobs.filter(j => (j.exit_time || j.entry_time || '').startsWith(date));
+      rawJobs = rawJobs.filter(j => {
+        const d = (j.exit_time || j.entry_time || '').slice(0, 10);
+        const isPaid = j.payment_status === 'settled' || j.bill_status === 'paid';
+        if (!isPaid) return true;
+        return d.startsWith(date);
+      });
     }
 
     let jobs = (await Promise.all(rawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
@@ -376,24 +384,41 @@ router.get('/', async (req, res) => {
       );
     }
 
+    function isBikeSegment(segment) {
+      if (!segment) return false;
+      const s = String(segment).toLowerCase().trim();
+      return s === 'bike' || s === 'scooter' || s.includes('bike') || s.includes('scooter');
+    }
+
     let totalCars = 0;
     let totalBikes = 0;
+    let unpaidCars = 0;
+    let unpaidBikes = 0;
+    let paidCars = 0;
+    let paidBikes = 0;
     let totalAmount = 0;
     let unpaidAmount = 0;
     let paidAmount = 0;
 
     summaryJobs.forEach(j => {
-      const isBike = j.vehicle?.segment === 'bike' || j.vehicle?.segment === 'scooter';
+      const seg = j.vehicle?.segment;
+      const isBike = isBikeSegment(seg);
+
       if (isBike) totalBikes++;
       else totalCars++;
 
       const price = j.bill?.final_amount != null ? Number(j.bill.final_amount) : (Number(j.price) || 0);
       totalAmount += price;
 
-      if (j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid')) {
+      const isPaid = j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid');
+      if (isPaid) {
         paidAmount += price;
+        if (isBike) paidBikes++;
+        else paidCars++;
       } else {
         unpaidAmount += price;
+        if (isBike) unpaidBikes++;
+        else unpaidCars++;
       }
     });
 
@@ -402,6 +427,12 @@ router.get('/', async (req, res) => {
         total_cars: totalCars,
         total_bikes: totalBikes,
         total_vehicles: totalCars + totalBikes,
+        unpaid_cars: unpaidCars,
+        unpaid_bikes: unpaidBikes,
+        unpaid_vehicles: unpaidCars + unpaidBikes,
+        paid_cars: paidCars,
+        paid_bikes: paidBikes,
+        paid_vehicles: paidCars + paidBikes,
         total_amount: totalAmount,
         unpaid_amount: unpaidAmount,
         paid_amount: paidAmount

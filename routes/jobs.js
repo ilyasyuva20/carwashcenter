@@ -181,8 +181,11 @@ router.post('/', async (req, res) => {
 
     const chainLube = has_chain_lube ? 1 : 0;
     const lubePrice = has_chain_lube ? (Number(chain_lube_price) || 150) : 0;
-    const parsedOfferPrice = Number(offer_price);
-    if (!Number.isFinite(parsedOfferPrice) || parsedOfferPrice < 0) {
+    const parsedOfferPrice = (offer_price !== undefined && offer_price !== null && offer_price !== '')
+      ? Number(offer_price)
+      : null;
+
+    if (parsedOfferPrice !== null && (!Number.isFinite(parsedOfferPrice) || parsedOfferPrice < 0)) {
       return res.status(400).json({ error: 'A valid offer price is required' });
     }
     const custType = customer_type === 'workshop' ? 'workshop' : 'normal';
@@ -239,7 +242,7 @@ router.put('/:id', async (req, res) => {
     const job = await db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id);
     if (!job) return res.status(404).json({ error: 'Not found' });
 
-    const { status, payment_status, customer_type, workshop_id } = req.body;
+    const { status, payment_status, customer_type, workshop_id, offer_price } = req.body;
 
     let newStatus = job.status;
     let exitTime = job.exit_time;
@@ -265,9 +268,15 @@ router.put('/:id', async (req, res) => {
       newWId = workshop_id ? Number(workshop_id) : null;
     }
 
+    let newOfferPrice = job.offer_price;
+    if (offer_price !== undefined) {
+      const p = Number(offer_price);
+      newOfferPrice = (offer_price !== null && offer_price !== '' && Number.isFinite(p) && p >= 0) ? p : null;
+    }
+
     await db.prepare(
-      'UPDATE jobs SET status = ?, exit_time = ?, payment_status = ?, customer_type = ?, workshop_id = ? WHERE id = ?'
-    ).run(newStatus, exitTime, newPayStatus, newCustType, newWId, job.id);
+      'UPDATE jobs SET status = ?, exit_time = ?, payment_status = ?, customer_type = ?, workshop_id = ?, offer_price = ? WHERE id = ?'
+    ).run(newStatus, exitTime, newPayStatus, newCustType, newWId, newOfferPrice, job.id);
 
     const fullJob = await getJobFull(job.id);
     res.json(fullJob);

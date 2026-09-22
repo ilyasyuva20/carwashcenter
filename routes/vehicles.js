@@ -16,7 +16,7 @@ router.get('/lookup/:regNumber', async (req, res) => {
 
     // Use the cached vehicle when the core details are already complete.
     // Active jobs reference this same vehicle row, so they are cached too.
-    if (vehicle && vehicle.brand && vehicle.model && vehicle.color) {
+    if (vehicle && vehicle.brand && vehicle.model && vehicle.color && vehicle.owner_name) {
       const correctedSegment = vehicle.segment === 'hatchback'
         ? normalizeCategory('', vehicle.model, vehicle.brand)
         : vehicle.segment;
@@ -31,6 +31,7 @@ router.get('/lookup/:regNumber', async (req, res) => {
           if (customer.name) vehicle.customer_name = customer.name;
         }
       }
+      if (!vehicle.customer_name && vehicle.owner_name) vehicle.customer_name = vehicle.owner_name;
       vehicle.source = 'database';
       return res.json(vehicle);
     }
@@ -49,18 +50,30 @@ router.get('/lookup/:regNumber', async (req, res) => {
 
       if (vehicle) {
         await db.prepare(
-          'UPDATE vehicles SET brand = ?, model = ?, segment = ?, color = ?, year = ? WHERE id = ?'
-        ).run(info.brand, info.model, info.segment, info.color, info.year || '', vehicle.id);
+          'UPDATE vehicles SET brand = ?, model = ?, segment = ?, color = ?, year = ?, owner_name = ? WHERE id = ?'
+        ).run(info.brand, info.model, info.segment, info.color, info.year || '', info.owner_name || '', vehicle.id);
         vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(vehicle.id);
         console.log(`[Database Update]: Updated vehicle ID ${vehicle.id} with new details.`);
       } else {
         const result = await db.prepare(
-          'INSERT INTO vehicles (reg_number, brand, model, segment, color, year) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(regNumber, info.brand, info.model, info.segment, info.color, info.year || '');
+          'INSERT INTO vehicles (reg_number, brand, model, segment, color, year, owner_name) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(regNumber, info.brand, info.model, info.segment, info.color, info.year || '', info.owner_name || '');
         vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(result.lastInsertRowid);
         console.log(`[Database Insert]: Saved new vehicle ID ${vehicle.id} to database.`);
       }
+      vehicle.customer_name = vehicle.owner_name || '';
       vehicle.source = info.source;
+      return res.json(vehicle);
+    }
+
+    // Keep existing vehicle details when the provider is temporarily unavailable.
+    if (vehicle && vehicle.brand && vehicle.model && vehicle.color) {
+      const phone = vehicle.customer_id
+        ? (await db.prepare('SELECT phone FROM customers WHERE id = ?').get(vehicle.customer_id))?.phone
+        : '';
+      vehicle.customer_name = vehicle.customer_name || vehicle.owner_name || '';
+      vehicle.phone = phone || '';
+      vehicle.source = 'database';
       return res.json(vehicle);
     }
 

@@ -1,11 +1,7 @@
 /**
  * Vehicle info lookup service for RTO VAHAN Details.
- * Supports multiple providers:
- * 1. Sandbox.co.in VAHAN API (Official Indian KYC/RC API)
- * 2. RapidAPI VAHAN Provider
- * 3. Custom Indian RTO Provider (APICountry, Surepass, Cashfree)
- * 4. APISetu Govt MoRTH API
- * 5. Puppeteer Headless Browser Scraper (Free fallback)
+ * Uses Cstudio RTO vehicle info as the primary provider, with a graceful
+ * Puppeteer/manual-entry fallback.
  */
 
 require('dotenv').config();
@@ -132,6 +128,10 @@ function cleanBrandName(maker = '') {
   if (cleaned.toLowerCase().includes('bajaj')) return 'Bajaj';
   if (cleaned.toLowerCase().includes('mahindra')) return 'Mahindra';
   return cleaned;
+}
+
+function titleCaseVehicleName(value = '') {
+  return value.toLowerCase().replace(/\b\w/g, character => character.toUpperCase());
 }
 
 function extractYear(dateStr = '') {
@@ -265,62 +265,62 @@ async function fetchFromSandbox(regNumber) {
 }
 
 /**
- * 2. RapidAPI VAHAN Provider (Supports rto-vehicle-details by flashbomberapp & other hosts)
+ * Cstudio RTO vehicle info provider.
  */
-async function fetchFromRapidAPI(regNumber) {
-  const apiKey = process.env.RAPIDAPI_KEY;
-  const apiHost = process.env.RAPIDAPI_HOST || 'rto-vehicle-details.p.rapidapi.com';
-  
+async function fetchFromCstudio(regNumber) {
+  const apiKey = process.env.CSTUDIO_API_KEY;
+  const apiUrl = process.env.CSTUDIO_API_URL || 'https://apiv2.cstudio.sbs/';
+
   if (!apiKey) {
+    console.warn('[Cstudio Warning]: CSTUDIO_API_KEY is missing');
     return null;
   }
 
   try {
-    const apiUrl = `https://${apiHost}/rc_v2.php?registration_no=${encodeURIComponent(regNumber)}`;
-    console.log(`[RapidAPI]: Querying ${apiUrl}...`);
-    const response = await fetch(apiUrl, {
+    const requestUrl = new URL(apiUrl);
+    requestUrl.searchParams.set('type', 'rcfastapi');
+    requestUrl.searchParams.set('key', apiKey);
+    requestUrl.searchParams.set('query', regNumber);
+    console.log(`[Cstudio]: Querying vehicle details for ${regNumber}...`);
+
+    const response = await fetch(requestUrl, {
       method: 'GET',
-      headers: {
-        'x-rapidapi-key': apiKey,
-        'x-rapidapi-host': apiHost,
-        'Accept': 'application/json'
-      }
+      headers: { Accept: 'application/json' }
     });
 
     if (!response.ok) {
-      console.warn(`[RapidAPI Warning]: HTTP ${response.status}`);
+      console.warn(`[Cstudio Warning]: HTTP ${response.status}`);
       return null;
     }
 
     const json = await response.json();
-    const vData = json?.other?.raw?.rc_details || json?.details || json?.data || json?.result || json?.response || json;
-    if (!vData) return null;
-
-    const combinedMakerModel = vData.makerModel || '';
-    const [combinedBrand, ...combinedModelParts] = combinedMakerModel.split(',');
-    const vehicleClass = vData.rc_vh_class_desc || vData.rc_body_type_desc || vData.vehicle_category_description || vData.vehicle_category || vData.vehicle_class || vData.vehicleClass || vData.body_type || vData.class || '';
-    const makerName = vData.rc_maker_desc || vData.makeData?.v_make_name || vData.maker_description || vData.maker_name || vData.maker || vData.brand || combinedBrand || '';
-    const modelName = vData.rc_maker_model || vData.maker_model || vData.model_name || vData.model || combinedModelParts.join(',').trim() || '';
-    const colorName = vData.rc_color || vData.color || vData.vehicle_color || vData.vehicleColor || 'White';
-    const yearVal = extractYear(vData.rc_regn_dt || vData.reg_date || vData.registration_date || vData.registrationDate || vData.manufacture_year || vData.manufacturing_date || vData.reg_year || '');
-    const brand = cleanBrandName(makerName);
-    const isScooterFlag = vData.makeData?.is_scooter === 1 || vData.makeData?.only_scooter === 1;
-
-    if (brand || modelName) {
-      console.log(`[RapidAPI SUCCESS]: Found details for ${regNumber} -> ${brand} ${modelName}`);
-      return {
-        reg_number: regNumber.toUpperCase(),
-        brand: brand || 'Vehicle',
-        model: modelName || 'Model',
-        segment: normalizeCategory(vehicleClass, modelName, brand, isScooterFlag),
-        color: colorName,
-        year: yearVal || '',
-        source: 'vahan-rapidapi',
-        not_found: false
-      };
+    if (json?.success !== true || String(json?.status).toLowerCase() !== 'success') {
+      console.warn(`[Cstudio Warning]: Vehicle not found for ${regNumber}`);
+      return null;
     }
+
+    const details = json.details || {};
+    const brand = cleanBrandName(json.make || '');
+    const modelName = json.model || '';
+    const vehicleClass = details.vehicle_category || '';
+    const yearVal = String(json.year || extractYear(json.registration_date || ''));
+
+    if (!brand && !modelName) return null;
+
+    console.log(`[Cstudio SUCCESS]: Found details for ${regNumber} -> ${brand} ${modelName}`);
+    return {
+      reg_number: (json.vehicle_number || regNumber).toUpperCase(),
+      owner_name: json.owner_name || '',
+      brand: brand || 'Vehicle',
+      model: modelName || 'Model',
+      segment: normalizeCategory(vehicleClass, modelName, brand),
+      color: json.color || 'White',
+      year: yearVal,
+      source: 'cstudio-rto-api',
+      not_found: false
+    };
   } catch (err) {
-    console.warn(`[RapidAPI Warning]: ${err.message}`);
+    console.warn(`[Cstudio Warning]: ${err.message}`);
   }
 
   return null;
@@ -433,15 +433,15 @@ async function fetchFromAPISetu(regNumber) {
  * Master Vehicle Lookup Function
  */
 async function lookupVehicle(regNumber) {
-  const method = (process.env.LOOKUP_METHOD || 'sandbox').toLowerCase();
+  const method = (process.env.LOOKUP_METHOD || 'cstudio').toLowerCase();
   console.log(`[RTO Lookup]: Requesting ${regNumber} via mode [${method}]...`);
 
   // 1. Primary method execution
-  if (method === 'sandbox') {
-    const res = await fetchFromSandbox(regNumber);
+  if (method === 'cstudio') {
+    const res = await fetchFromCstudio(regNumber);
     if (res && !res.not_found) return res;
-  } else if (method === 'rapidapi') {
-    const res = await fetchFromRapidAPI(regNumber);
+  } else if (method === 'sandbox') {
+    const res = await fetchFromSandbox(regNumber);
     if (res && !res.not_found) return res;
   } else if (method === 'custom_api') {
     const res = await fetchFromCustomAPI(regNumber);
@@ -455,12 +455,6 @@ async function lookupVehicle(regNumber) {
   if (method !== 'sandbox' && process.env.SANDBOX_API_KEY && process.env.SANDBOX_API_SECRET) {
     console.log('[RTO Lookup]: Trying Sandbox.co.in fallback...');
     const res = await fetchFromSandbox(regNumber);
-    if (res && !res.not_found) return res;
-  }
-
-  if (method !== 'rapidapi' && process.env.RAPIDAPI_KEY) {
-    console.log('[RTO Lookup]: Trying RapidAPI fallback...');
-    const res = await fetchFromRapidAPI(regNumber);
     if (res && !res.not_found) return res;
   }
 
