@@ -93,17 +93,26 @@ router.post('/opening-balance', async (req, res) => {
     const opCash = Number(opening_cash) || 0;
     const opGpay = Number(opening_gpay) || 0;
 
-    const existing = await db.prepare('SELECT * FROM daily_opening_balances WHERE date = ?').get(targetDate);
-    if (existing) {
-      await db.prepare('UPDATE daily_opening_balances SET opening_cash = ?, opening_gpay = ? WHERE date = ?')
-        .run(opCash, opGpay, targetDate);
+    if (db.isPostgres) {
+      await db.prepare(`
+        INSERT INTO daily_opening_balances (date, opening_cash, opening_gpay)
+        VALUES (?, ?, ?)
+        ON CONFLICT (date) DO UPDATE SET opening_cash = EXCLUDED.opening_cash, opening_gpay = EXCLUDED.opening_gpay
+      `).run(targetDate, opCash, opGpay);
     } else {
-      await db.prepare('INSERT INTO daily_opening_balances (date, opening_cash, opening_gpay) VALUES (?, ?, ?)')
-        .run(targetDate, opCash, opGpay);
+      const existing = await db.prepare('SELECT * FROM daily_opening_balances WHERE date = ?').get(targetDate);
+      if (existing) {
+        await db.prepare('UPDATE daily_opening_balances SET opening_cash = ?, opening_gpay = ? WHERE date = ?')
+          .run(opCash, opGpay, targetDate);
+      } else {
+        await db.prepare('INSERT INTO daily_opening_balances (date, opening_cash, opening_gpay) VALUES (?, ?, ?)')
+          .run(targetDate, opCash, opGpay);
+      }
     }
 
     res.json({ ok: true });
   } catch (err) {
+    console.error('Error in POST /reports/opening-balance:', err);
     res.status(500).json({ error: err.message });
   }
 });

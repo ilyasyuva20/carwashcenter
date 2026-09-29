@@ -281,6 +281,33 @@ router.get('/preview/:jobId', async (req, res) => {
   }
 });
 
+// Adjust bill amount for an unpaid job before payment completion
+router.post('/adjust-amount', async (req, res) => {
+  try {
+    const { job_id, new_amount } = req.body;
+    if (!job_id || new_amount === undefined || isNaN(Number(new_amount)) || Number(new_amount) < 0) {
+      return res.status(400).json({ error: 'Valid job_id and non-negative new_amount are required' });
+    }
+    const job = await db.prepare('SELECT * FROM jobs WHERE id = ?').get(job_id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    const amountNum = Number(new_amount);
+    await db.prepare('UPDATE jobs SET offer_price = ? WHERE id = ?').run(amountNum, job.id);
+
+    const bill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
+    if (bill && bill.status !== 'paid') {
+      const discount = Number(bill.discount_amount) || 0;
+      const finalAmt = Math.max(0, amountNum - discount);
+      await db.prepare('UPDATE bills SET amount = ?, final_amount = ? WHERE id = ?').run(amountNum, finalAmt, bill.id);
+    }
+
+    const updated = await getJobFull(job.id);
+    res.json({ ok: true, job: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Create + pay a bill. Body: { job_id, payment_method: 'cash'|'gpay', redeem: bool }
 router.post('/', async (req, res) => {
   try {
@@ -329,7 +356,7 @@ router.get('/', async (req, res) => {
   try {
     const { date, startDate, endDate, segment, payment_status, q } = req.query;
 
-    let rawJobs = await db.prepare(`
+    let allRawJobs = await db.prepare(`
       SELECT j.id, j.entry_time, j.exit_time, j.payment_status, b.status AS bill_status
       FROM jobs j
       LEFT JOIN bills b ON b.job_id = j.id
@@ -338,23 +365,59 @@ router.get('/', async (req, res) => {
       ORDER BY j.id DESC
     `).all();
 
-    if (startDate && endDate) {
-      rawJobs = rawJobs.filter(j => {
-        const d = (j.exit_time || j.entry_time || '').slice(0, 10);
-        const isPaid = j.payment_status === 'settled' || j.bill_status === 'paid';
-        if (!isPaid) return true;
-        return d >= startDate && d <= endDate;
-      });
-    } else if (date) {
-      rawJobs = rawJobs.filter(j => {
-        const d = (j.exit_time || j.entry_time || '').slice(0, 10);
-        const isPaid = j.payment_status === 'settled' || j.bill_status === 'paid';
-        if (!isPaid) return true;
-        return d.startsWith(date);
-      });
+    // Fetch full job objects first so date & payment status match exact frontend definitions
+    let allJobs = (await Promise.all(allRawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
+
+    // Helper to extract YYYY-MM-DD in local time matching frontend Completed Date display
+    function getJobDateStr(j) {
+      const val = j.exit_time || j.completed_at || j.entry_time;
+      if (!val) return '';
+      const dt = new Date(val);
+      if (isNaN(dt.getTime())) return String(val).slice(0, 10);
+      const y = dt.getFullYear();
+      const m = String(dt.getMonth() + 1).padStart(2, '0');
+      const d = String(dt.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
     }
 
-    let jobs = (await Promise.all(rawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
+    // Get today's local date string YYYY-MM-DD
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const refStartDate = startDate || date || todayStr;
+
+    // Count unpaid jobs completed before refStartDate (other pending)
+    let otherPendingCount = 0;
+    allJobs.forEach(j => {
+      const isPaid = j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid');
+      const d = getJobDateStr(j);
+      if (!isPaid && d < refStartDate) {
+        otherPendingCount++;
+      }
+    });
+
+    let jobs = allJobs;
+
+    if (payment_status === 'other_pending' || payment_status === 'previous_pending') {
+      // Filter for unpaid jobs completed strictly before refStartDate
+      jobs = jobs.filter(j => {
+        const isPaid = j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid');
+        const d = getJobDateStr(j);
+        return !isPaid && d < refStartDate;
+      });
+    } else {
+      // Filter strictly by date range using getJobDateStr
+      if (startDate && endDate) {
+        jobs = jobs.filter(j => {
+          const d = getJobDateStr(j);
+          return d >= startDate && d <= endDate;
+        });
+      } else if (date) {
+        jobs = jobs.filter(j => {
+          const d = getJobDateStr(j);
+          return d === date;
+        });
+      }
+    }
 
     if (segment && segment !== 'all') {
       if (segment === 'car') {
@@ -366,7 +429,7 @@ router.get('/', async (req, res) => {
 
     let summaryJobs = [...jobs];
 
-    if (payment_status && payment_status !== 'all') {
+    if (payment_status && payment_status !== 'all' && payment_status !== 'other_pending' && payment_status !== 'previous_pending') {
       if (payment_status === 'unpaid' || payment_status === 'unsettled') {
         jobs = jobs.filter(j => j.payment_status !== 'settled' && (!j.bill || j.bill.status !== 'paid'));
       } else if (payment_status === 'paid' || payment_status === 'settled') {
@@ -435,7 +498,8 @@ router.get('/', async (req, res) => {
         paid_vehicles: paidCars + paidBikes,
         total_amount: totalAmount,
         unpaid_amount: unpaidAmount,
-        paid_amount: paidAmount
+        paid_amount: paidAmount,
+        other_pending_count: otherPendingCount
       },
       jobs
     });

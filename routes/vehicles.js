@@ -10,7 +10,19 @@ router.get('/lookup/:regNumber', async (req, res) => {
   try {
     const regNumber = req.params.regNumber.toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (!REGEX_PLATE.test(regNumber)) {
-      return res.status(400).json({ error: 'Invalid registration number format (e.g. KL32L2011 or 22BH1234A)' });
+      return res.json({
+        id: null,
+        reg_number: regNumber,
+        brand: '',
+        model: '',
+        segment: 'hatchback',
+        color: '',
+        year: '',
+        customer_id: null,
+        phone: '',
+        source: 'manual-entry',
+        not_found: true
+      });
     }
     let vehicle = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regNumber);
 

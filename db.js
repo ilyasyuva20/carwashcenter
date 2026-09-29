@@ -36,7 +36,7 @@ if (usePostgres) {
           let query = pgSql;
           const isInsert = /^\s*INSERT\s+INTO/i.test(query);
           if (isInsert && !/RETURNING/i.test(query)) {
-            query += ' RETURNING id';
+            query += ' RETURNING *';
           }
           try {
             const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);
