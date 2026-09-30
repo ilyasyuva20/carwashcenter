@@ -15,6 +15,7 @@ app.use('/api/employees', require('./routes/employees'));
 app.use('/api/attendance', require('./routes/attendance'));
 app.use('/api/payroll', require('./routes/payroll'));
 app.use('/api/vehicles', require('./routes/vehicles'));
+app.use('/api/customers', require('./routes/customers'));
 app.use('/api/wash-types', require('./routes/washTypes'));
 app.use('/api/jobs', require('./routes/jobs'));
 app.use('/api/bills', require('./routes/bills'));
