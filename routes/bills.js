@@ -231,25 +231,45 @@ router.get('/pdf/:jobId', async (req, res) => {
       </html>
     `;
 
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    const page = await browser.newPage();
-    await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
-    const pdfBuffer = await page.pdf({
-      format: 'A5',
-      printBackground: true,
-      margin: { top: '10px', bottom: '10px', left: '10px', right: '10px' }
-    });
-    await browser.close();
+    let browser = null;
+    try {
+      browser = await puppeteer.launch({
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu'
+        ]
+      });
+      const page = await browser.newPage();
+      await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+      const pdfBuffer = await page.pdf({
+        format: 'A5',
+        printBackground: true,
+        margin: { top: '10px', bottom: '10px', left: '10px', right: '10px' }
+      });
+      await browser.close();
 
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="Receipt_${job.vehicle?.reg_number || job.id}.pdf"`);
-    res.end(Buffer.from(pdfBuffer));
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="Receipt_${job.vehicle?.reg_number || job.id}.pdf"`);
+      return res.end(Buffer.from(pdfBuffer));
+    } catch (puppeteerErr) {
+      console.error('Puppeteer launch/PDF error:', puppeteerErr);
+      if (browser) await browser.close().catch(() => {});
+      // Fallback: If headless Chrome fails on low-resource container, serve clean HTML receipt with auto-print
+      const printableHtml = htmlContent.replace('</head>', '<script>window.onload = function() { window.print(); };</script></head>');
+      res.setHeader("Content-Type", "text/html");
+      return res.send(printableHtml);
+    }
   } catch (err) {
-    console.error('PDF generation error:', err);
-    res.status(500).send('Error generating PDF receipt');
+    console.error('PDF generation handler error:', err);
+    res.status(500).send('Error generating receipt');
   }
 });
 
