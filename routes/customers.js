@@ -2,30 +2,44 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
-// Search customers by name, phone, or vehicle registration number
+// Search customers by name, phone, vehicle registration number, or monthly subscription
 router.get('/search', async (req, res) => {
   try {
-    const q = (req.query.q || '').trim();
-    if (!q) return res.json([]);
+    const rawQ = (req.query.q || '').trim();
+    if (!rawQ) return res.json([]);
 
-    const searchPattern = `%${q}%`;
-    const searchPhonePattern = `%${q.replace(/\D/g, '')}%`;
+    const today = new Date().toISOString().slice(0, 10);
 
-    // 1. Search customers table by name or phone (case-insensitive)
-    const matchedCustomers = await db.prepare(
-      'SELECT * FROM customers WHERE LOWER(name) LIKE LOWER(?) OR (phone IS NOT NULL AND phone != \'\' AND LOWER(phone) LIKE LOWER(?))'
-    ).all(searchPattern, searchPhonePattern.length > 2 ? searchPhonePattern : searchPattern);
+    // Normalized search patterns (strip spaces and special characters for flexible plate matching)
+    const cleanReg = rawQ.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    const searchPattern = `%${rawQ}%`;
+    const cleanRegPattern = `%${cleanReg}%`;
+    const phoneDigits = rawQ.replace(/\D/g, '');
+    const phonePattern = phoneDigits.length >= 3 ? `%${phoneDigits}%` : searchPattern;
 
-    // Map customer IDs we already found
+    // 1. Search customers table by name or phone (case-insensitive & space-insensitive)
+    const matchedCustomers = await db.prepare(`
+      SELECT * FROM customers 
+      WHERE LOWER(name) LIKE LOWER(?) 
+         OR (phone IS NOT NULL AND phone != '' AND REPLACE(REPLACE(phone, ' ', ''), '-', '') LIKE ?)
+    `).all(searchPattern, phonePattern);
+
     const foundCustomerIds = new Set(matchedCustomers.map(c => c.id));
     const customerList = [...matchedCustomers];
 
-    // 2. Search vehicles table by owner_name or reg_number (case-insensitive)
-    const matchedVehicles = await db.prepare(
-      'SELECT * FROM vehicles WHERE LOWER(owner_name) LIKE LOWER(?) OR LOWER(reg_number) LIKE LOWER(?)'
-    ).all(searchPattern, searchPattern);
+    // 2. Search vehicles table by owner_name or reg_number (flexible case & space matching)
+    const matchedVehicles = await db.prepare(`
+      SELECT * FROM vehicles 
+      WHERE LOWER(owner_name) LIKE LOWER(?) 
+         OR LOWER(reg_number) LIKE LOWER(?) 
+         OR (${cleanReg.length >= 3 ? "REPLACE(REPLACE(REPLACE(LOWER(reg_number), ' ', ''), '-', ''), '.', '') LIKE LOWER(?)" : "0"})
+    `).all(
+      searchPattern,
+      searchPattern,
+      ...(cleanReg.length >= 3 ? [cleanRegPattern] : [])
+    );
 
-    // If any matched vehicle belongs to a customer not in foundCustomerIds, fetch/add customer
+    // Add customers for matched vehicles if not already included
     for (const v of matchedVehicles) {
       if (v.customer_id && !foundCustomerIds.has(v.customer_id)) {
         const cust = await db.prepare('SELECT * FROM customers WHERE id = ?').get(v.customer_id);
@@ -36,13 +50,33 @@ router.get('/search', async (req, res) => {
       }
     }
 
-    // 3. For each customer in list, fetch ALL their registered vehicles
+    // 3. Search subscriptions table (by plan_name, customer_id, or linked vehicles)
+    const matchedSubscriptions = await db.prepare(`
+      SELECT s.*, c.name as customer_name, c.phone as customer_phone
+      FROM subscriptions s
+      JOIN customers c ON c.id = s.customer_id
+      WHERE LOWER(c.name) LIKE LOWER(?) 
+         OR (c.phone IS NOT NULL AND REPLACE(REPLACE(c.phone, ' ', ''), '-', '') LIKE ?)
+         OR LOWER(s.plan_name) LIKE LOWER(?)
+    `).all(searchPattern, phonePattern, searchPattern);
+
+    for (const sub of matchedSubscriptions) {
+      if (sub.customer_id && !foundCustomerIds.has(sub.customer_id)) {
+        const cust = await db.prepare('SELECT * FROM customers WHERE id = ?').get(sub.customer_id);
+        if (cust) {
+          foundCustomerIds.add(cust.id);
+          customerList.push(cust);
+        }
+      }
+    }
+
+    // 4. For each customer in list, fetch ALL registered vehicles and check active subscriptions
     const results = await Promise.all(customerList.map(async (cust) => {
       let vehicles = await db.prepare(
         'SELECT * FROM vehicles WHERE customer_id = ? ORDER BY id DESC'
       ).all(cust.id);
 
-      // Fallback: match by owner_name if customer_id wasn't set on vehicle (case-insensitive)
+      // Fallback: match by owner_name if customer_id wasn't set on vehicle
       if (cust.name) {
         const ownerVehicles = await db.prepare(
           'SELECT * FROM vehicles WHERE (customer_id IS NULL OR customer_id = 0) AND LOWER(owner_name) = LOWER(?)'
@@ -53,25 +87,77 @@ router.get('/search', async (req, res) => {
         });
       }
 
+      // Check active monthly subscriptions for this customer
+      const activeSubs = await db.prepare(`
+        SELECT * FROM subscriptions 
+        WHERE customer_id = ? AND status != 'cancelled' AND start_date <= ? AND end_date >= ?
+      `).all(cust.id, today, today);
+
+      const primarySub = activeSubs[0] || null;
+
+      // Attach active subscription data to each vehicle if linked
+      const vehiclesWithSub = await Promise.all(vehicles.map(async (v) => {
+        const vSub = await db.prepare(`
+          SELECT s.* FROM subscription_vehicles sv
+          JOIN subscriptions s ON s.id = sv.subscription_id
+          WHERE sv.vehicle_id = ? AND s.status != 'cancelled' AND s.start_date <= ? AND s.end_date >= ?
+        `).get(v.id, today, today);
+
+        return {
+          ...v,
+          subscription: vSub || primarySub || null
+        };
+      }));
+
+      const hasActiveSub = activeSubs.length > 0 || vehiclesWithSub.some(v => v.subscription);
+
       return {
         id: cust.id,
         name: cust.name || 'Customer',
         phone: cust.phone || '',
         reward_points: cust.reward_points || 0,
-        vehicles
+        has_active_subscription: hasActiveSub,
+        active_subscription: primarySub ? {
+          id: primarySub.id,
+          plan_name: primarySub.plan_name,
+          end_date: primarySub.end_date,
+          washes_used: primarySub.washes_used,
+          max_washes: primarySub.max_washes
+        } : (vehiclesWithSub.find(v => v.subscription)?.subscription ? {
+          id: vehiclesWithSub.find(v => v.subscription).subscription.id,
+          plan_name: vehiclesWithSub.find(v => v.subscription).subscription.plan_name,
+          end_date: vehiclesWithSub.find(v => v.subscription).subscription.end_date,
+          washes_used: vehiclesWithSub.find(v => v.subscription).subscription.washes_used,
+          max_washes: vehiclesWithSub.find(v => v.subscription).subscription.max_washes
+        } : null),
+        vehicles: vehiclesWithSub
       };
     }));
 
-    // If query matched vehicles whose owner has no customer row yet, add synthetic customer entry
+    // Add entries for vehicles matched without customer record
     const claimedVehicleIds = new Set(results.flatMap(r => r.vehicles.map(v => v.id)));
     for (const v of matchedVehicles) {
       if (!claimedVehicleIds.has(v.id)) {
+        const vSub = await db.prepare(`
+          SELECT s.* FROM subscription_vehicles sv
+          JOIN subscriptions s ON s.id = sv.subscription_id
+          WHERE sv.vehicle_id = ? AND s.status != 'cancelled' AND s.start_date <= ? AND s.end_date >= ?
+        `).get(v.id, today, today);
+
         results.push({
           id: null,
           name: v.owner_name || v.reg_number,
           phone: '',
           reward_points: 0,
-          vehicles: [v]
+          has_active_subscription: !!vSub,
+          active_subscription: vSub ? {
+            id: vSub.id,
+            plan_name: vSub.plan_name,
+            end_date: vSub.end_date,
+            washes_used: vSub.washes_used,
+            max_washes: vSub.max_washes
+          } : null,
+          vehicles: [{ ...v, subscription: vSub || null }]
         });
         claimedVehicleIds.add(v.id);
       }
@@ -79,9 +165,11 @@ router.get('/search', async (req, res) => {
 
     res.json(results);
   } catch (err) {
+    console.error('Error searching customers:', err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // List all customers
 router.get('/', async (req, res) => {
