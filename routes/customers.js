@@ -126,12 +126,13 @@ router.post('/', async (req, res) => {
         let existingVeh = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regUpper);
         if (existingVeh) {
           await db.prepare(`
-            UPDATE vehicles SET customer_id = ?, brand = ?, model = ?, segment = ?, owner_name = ? WHERE id = ?
+            UPDATE vehicles SET customer_id = ?, brand = ?, model = ?, segment = ?, color = ?, owner_name = ? WHERE id = ?
           `).run(
             customer.id,
             v.brand || existingVeh.brand || '',
             v.model || existingVeh.model || '',
             v.segment || existingVeh.segment || 'hatchback',
+            v.color || existingVeh.color || '',
             customer.name,
             existingVeh.id
           );
@@ -146,8 +147,8 @@ router.post('/', async (req, res) => {
             v.brand || '',
             v.model || '',
             v.segment || 'hatchback',
-            '',
-            '',
+            v.color || '',
+            v.year || '',
             customer.id,
             customer.name
           );
@@ -171,7 +172,7 @@ router.post('/:id/vehicles', async (req, res) => {
     const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(customerId);
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    const { reg_number, brand, model, segment } = req.body;
+    const { reg_number, brand, model, segment, color } = req.body;
     if (!reg_number || !reg_number.trim()) return res.status(400).json({ error: 'Vehicle registration number is required' });
 
     const regUpper = reg_number.trim().toUpperCase();
@@ -179,25 +180,27 @@ router.post('/:id/vehicles', async (req, res) => {
     let vehicle = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regUpper);
     if (vehicle) {
       await db.prepare(`
-        UPDATE vehicles SET customer_id = ?, brand = ?, model = ?, segment = ?, owner_name = ? WHERE id = ?
+        UPDATE vehicles SET customer_id = ?, brand = ?, model = ?, segment = ?, color = ?, owner_name = ? WHERE id = ?
       `).run(
         customerId,
         brand || vehicle.brand || '',
         model || vehicle.model || '',
         segment || vehicle.segment || 'hatchback',
+        color || vehicle.color || '',
         customer.name,
         vehicle.id
       );
       vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(vehicle.id);
     } else {
       const stmt = await db.prepare(`
-        INSERT INTO vehicles (reg_number, brand, model, segment, customer_id, owner_name)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO vehicles (reg_number, brand, model, segment, color, customer_id, owner_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(
         regUpper,
         brand || '',
         model || '',
         segment || 'hatchback',
+        color || '',
         customerId,
         customer.name
       );
