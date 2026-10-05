@@ -7,30 +7,40 @@ async function computePayroll(employee_id, month, year) {
   const emp = await db.prepare('SELECT * FROM employees WHERE id = ?').get(employee_id);
   if (!emp) return null;
 
+  const monthStr = String(month).padStart(2, '0');
+  const monthPattern = `${year}-${monthStr}-%`;
+
   const attRows = await db.prepare(
     `SELECT * FROM attendance WHERE employee_id = ? AND date LIKE ?`
-  ).all(employee_id, `${year}-${String(month).padStart(2, '0')}-%`);
+  ).all(employee_id, monthPattern);
 
   const advRows = await db.prepare(
     `SELECT * FROM advances WHERE employee_id = ? AND date LIKE ?`
-  ).all(employee_id, `${year}-${String(month).padStart(2, '0')}-%`);
-
-  const presentDays = attRows.filter(a => a.status === 'present').length
-    + attRows.filter(a => a.status === 'half_day').length * 0.5;
-  const leaveDays = attRows.filter(a => a.status === 'leave' || a.status === 'absent').length;
-
-  const totalLateMinutes = attRows.reduce((s, a) => s + (Number(a.late_minutes) || 0), 0);
-  const totalOvertimeMinutes = attRows.reduce((s, a) => s + (Number(a.overtime_minutes) || 0), 0);
+  ).all(employee_id, monthPattern);
 
   const baseSalary = Number(emp.salary_monthly) || 0;
-  const perDaySalary = baseSalary / 30;
-  const hourlyRate = perDaySalary / 8;
+  const perDaySalary = baseSalary / 30; // ₹600/day for ₹18,000 monthly
+  const hourlyRate = perDaySalary / 8; // 8 hours duty -> ₹75/hour
+  const perMinuteRate = hourlyRate / 60; // ₹1.25/minute
 
-  const lateDeduction = Math.round((totalLateMinutes / 60) * hourlyRate);
+  const fullDaysAbsent = attRows.filter(a => a.status === 'leave' || a.status === 'absent').length;
+  const halfDaysCount = attRows.filter(a => a.status === 'half_day').length;
+
+  const fullDayLeaveDeduction = fullDaysAbsent * perDaySalary;
+  const halfDayLeaveDeduction = halfDaysCount * (perDaySalary / 2);
+  const totalLeaveDeduction = fullDayLeaveDeduction + halfDayLeaveDeduction;
+
+  const totalLateMinutes = attRows.reduce((s, a) => s + (Number(a.late_minutes) || 0), 0);
+  const lateDeduction = Math.round(totalLateMinutes * perMinuteRate);
+
+  const totalOvertimeMinutes = attRows.reduce((s, a) => s + (Number(a.overtime_minutes) || 0), 0);
   const overtimePay = Math.round((totalOvertimeMinutes / 60) * hourlyRate * 1.5);
+
   const advanceDeduction = advRows.reduce((s, a) => s + (Number(a.amount) || 0), 0);
 
-  const netPay = Math.round(presentDays * perDaySalary + overtimePay - lateDeduction - advanceDeduction);
+  const netPay = Math.max(0, Math.round(baseSalary - totalLeaveDeduction - lateDeduction + overtimePay - advanceDeduction));
+
+  const presentDays = attRows.filter(a => a.status === 'present').length + (halfDaysCount * 0.5);
 
   return {
     employee_id,
@@ -38,9 +48,15 @@ async function computePayroll(employee_id, month, year) {
     month,
     year,
     base_salary: baseSalary,
+    per_day_salary: Math.round(perDaySalary * 100) / 100,
+    hourly_rate: Math.round(hourlyRate * 100) / 100,
     present_days: presentDays,
-    leave_days: leaveDays,
+    leave_days: fullDaysAbsent,
+    half_days: halfDaysCount,
+    leave_deduction: Math.round(totalLeaveDeduction),
+    total_late_minutes: totalLateMinutes,
     late_deduction: lateDeduction,
+    total_overtime_minutes: totalOvertimeMinutes,
     overtime_pay: overtimePay,
     advance_deduction: advanceDeduction,
     net_pay: netPay

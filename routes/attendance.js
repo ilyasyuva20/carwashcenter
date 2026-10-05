@@ -87,4 +87,43 @@ router.post('/mark', async (req, res) => {
   }
 });
 
+// Update attendance record details (late_minutes, overtime_minutes, status, check_in, check_out)
+router.post('/update', async (req, res) => {
+  try {
+    const { employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out } = req.body;
+    const existing = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
+    if (existing) {
+      const newStatus = status !== undefined ? status : existing.status;
+      const newLate = late_minutes !== undefined ? Number(late_minutes) : existing.late_minutes;
+      const newOt = overtime_minutes !== undefined ? Number(overtime_minutes) : existing.overtime_minutes;
+      const newCin = check_in !== undefined ? check_in : existing.check_in;
+      const newCout = check_out !== undefined ? check_out : existing.check_out;
+
+      await db.prepare(`
+        UPDATE attendance 
+        SET status = ?, late_minutes = ?, overtime_minutes = ?, check_in = ?, check_out = ?
+        WHERE id = ?
+      `).run(newStatus, newLate, newOt, newCin, newCout, existing.id);
+    } else {
+      await db.prepare(`
+        INSERT INTO attendance (employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        employee_id,
+        date,
+        status || 'present',
+        late_minutes !== undefined ? Number(late_minutes) : 0,
+        overtime_minutes !== undefined ? Number(overtime_minutes) : 0,
+        check_in || null,
+        check_out || null
+      );
+    }
+    const result = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
+
