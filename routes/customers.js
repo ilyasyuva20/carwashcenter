@@ -11,18 +11,18 @@ router.get('/search', async (req, res) => {
     const searchPattern = `%${q}%`;
     const searchPhonePattern = `%${q.replace(/\D/g, '')}%`;
 
-    // 1. Search customers table by name or phone
+    // 1. Search customers table by name or phone (case-insensitive)
     const matchedCustomers = await db.prepare(
-      'SELECT * FROM customers WHERE name LIKE ? OR (phone IS NOT NULL AND phone != \'\' AND phone LIKE ?)'
+      'SELECT * FROM customers WHERE LOWER(name) LIKE LOWER(?) OR (phone IS NOT NULL AND phone != \'\' AND LOWER(phone) LIKE LOWER(?))'
     ).all(searchPattern, searchPhonePattern.length > 2 ? searchPhonePattern : searchPattern);
 
     // Map customer IDs we already found
     const foundCustomerIds = new Set(matchedCustomers.map(c => c.id));
     const customerList = [...matchedCustomers];
 
-    // 2. Search vehicles table by owner_name or reg_number
+    // 2. Search vehicles table by owner_name or reg_number (case-insensitive)
     const matchedVehicles = await db.prepare(
-      'SELECT * FROM vehicles WHERE owner_name LIKE ? OR reg_number LIKE ?'
+      'SELECT * FROM vehicles WHERE LOWER(owner_name) LIKE LOWER(?) OR LOWER(reg_number) LIKE LOWER(?)'
     ).all(searchPattern, searchPattern);
 
     // If any matched vehicle belongs to a customer not in foundCustomerIds, fetch/add customer
@@ -42,10 +42,10 @@ router.get('/search', async (req, res) => {
         'SELECT * FROM vehicles WHERE customer_id = ? ORDER BY id DESC'
       ).all(cust.id);
 
-      // Fallback: match by owner_name if customer_id wasn't set on vehicle
+      // Fallback: match by owner_name if customer_id wasn't set on vehicle (case-insensitive)
       if (cust.name) {
         const ownerVehicles = await db.prepare(
-          'SELECT * FROM vehicles WHERE (customer_id IS NULL OR customer_id = 0) AND owner_name = ?'
+          'SELECT * FROM vehicles WHERE (customer_id IS NULL OR customer_id = 0) AND LOWER(owner_name) = LOWER(?)'
         ).all(cust.name);
         const existingVIds = new Set(vehicles.map(v => v.id));
         ownerVehicles.forEach(v => {
