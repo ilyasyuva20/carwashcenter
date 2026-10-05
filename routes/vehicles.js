@@ -132,6 +132,11 @@ router.put('/:id', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
+    const { customer_id } = req.query;
+    if (customer_id) {
+      const rows = await db.prepare('SELECT * FROM vehicles WHERE customer_id = ? ORDER BY id DESC').all(customer_id);
+      return res.json(rows);
+    }
     const rows = await db.prepare('SELECT * FROM vehicles ORDER BY id DESC').all();
     res.json(rows);
   } catch (err) {
