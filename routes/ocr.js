@@ -203,4 +203,158 @@ router.post('/scan', async (req, res) => {
   }
 });
 
+function parseInvoiceFromText(rawText) {
+  if (!rawText) return {};
+
+  const lines = rawText.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+
+  let supplierName = '';
+  let invoiceNumber = '';
+  let invoiceDate = '';
+  let totalAmount = 0;
+  let paidAmount = 0;
+  let balanceAmount = 0;
+  const items = [];
+
+  // 1. Detect Supplier Name
+  for (let i = 0; i < Math.min(12, lines.length); i++) {
+    const line = lines[i];
+    if (/tax invoice|original|recipient|bill to|invoice no|date|place of supply|gstin/i.test(line)) continue;
+
+    if (/\b(LLP|PVT|LTD|TRADERS|ENTERPRISES|CARE|UPCARE|DISTRIBUTORS|AGENCIES|COMPANY|STORE|CHEMICALS|WORKSHOP|SUPPLIER)\b/i.test(line)) {
+      supplierName = line.replace(/^(tax invoice|original for recipient|invoice)\s*/i, '').trim();
+      break;
+    }
+  }
+
+  if (!supplierName) {
+    for (let i = 0; i < Math.min(5, lines.length); i++) {
+      if (!/tax invoice|original|recipient|invoice|bill|date|state/i.test(lines[i]) && lines[i].length > 3) {
+        supplierName = lines[i];
+        break;
+      }
+    }
+  }
+
+  // 2. Invoice Number
+  const invNoMatch = rawText.match(/(?:Invoice\s*No|Inv\s*No|Bill\s*No|Invoice\s*#)[\s.:]*([A-Z0-9\/-]+)/i);
+  if (invNoMatch) {
+    invoiceNumber = invNoMatch[1];
+  }
+
+  // 3. Invoice Date
+  const dateMatch = rawText.match(/(?:Date|Dated)[\s.:]*(\d{1,4}[-\/\.]\d{1,2}[-\/\.]\d{1,4})/i);
+  if (dateMatch) {
+    invoiceDate = dateMatch[1];
+  }
+
+  // 4. Line items table parser
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/item name|hsn|quantity|price|amount|taxable|cgst|sgst|sub total|grand total/i.test(line)) continue;
+
+    const amountMatch = line.match(/(?:₹|\b)(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*$/);
+    if (amountMatch) {
+      const lineAmt = parseFloat(amountMatch[1].replace(/,/g, ''));
+      if (lineAmt > 0 && !/sub\s*total|total|tax|balance|due|payable|amount in words/i.test(line)) {
+        let cleanItemLine = line
+          .replace(/^\d+[\s.]*/, '')
+          .replace(/(?:₹|\b)\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*$/, '')
+          .replace(/\b\d{4,8}\b/g, '')
+          .replace(/\(\d+%\)/g, '')
+          .trim();
+
+        const qtyMatch = line.match(/\b(\d+)\s*(?:Kg|L|Pcs|Boxes|Units|Bottles|Grams)?\b/i);
+        const qty = qtyMatch ? qtyMatch[0] : '';
+
+        if (cleanItemLine.length > 2) {
+          items.push({
+            name: cleanItemLine,
+            qty: qty || '',
+            amount: lineAmt
+          });
+        }
+      }
+    }
+  }
+
+  // 5. Total Billed Amount
+  const totalMatch = rawText.match(/(?:Total|Grand Total|Sub Total|SubTotal|Invoice Amount)[\s.:]*₹?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i);
+  if (totalMatch) {
+    totalAmount = parseFloat(totalMatch[1].replace(/,/g, ''));
+  }
+
+  if (!totalAmount && items.length > 0) {
+    totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
+  }
+
+  // 6. Balance / Paid detection
+  const balanceMatch = rawText.match(/(?:Balance|Balance Amount)[\s.:]*₹?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i);
+  if (balanceMatch) {
+    balanceAmount = parseFloat(balanceMatch[1].replace(/,/g, ''));
+  }
+
+  const paidMatch = rawText.match(/(?:Paid|Amount Paid|Advance Paid)[\s.:]*₹?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i);
+  if (paidMatch) {
+    paidAmount = parseFloat(paidMatch[1].replace(/,/g, ''));
+  }
+
+  return {
+    supplier_name: supplierName || 'Unknown Supplier',
+    invoice_number: invoiceNumber || '',
+    invoice_date: invoiceDate || '',
+    items,
+    total_amount: totalAmount || 0,
+    paid_amount: paidAmount || 0,
+    balance_amount: balanceAmount || 0,
+    raw_text: rawText
+  };
+}
+
+// POST /api/ocr/scan-invoice
+router.post('/scan-invoice', async (req, res) => {
+  try {
+    const { image } = req.body;
+    if (!image) {
+      return res.status(400).json({ error: 'Image data is required' });
+    }
+
+    const apiKey = process.env.OCR_SPACE_API_KEY || 'K89818686888957';
+    let base64Data = image;
+
+    if (!base64Data.startsWith('data:image/')) {
+      base64Data = `data:image/jpeg;base64,${base64Data}`;
+    }
+
+    const formData = new FormData();
+    formData.append('apikey', apiKey);
+    formData.append('base64Image', base64Data);
+    formData.append('OCREngine', '2'); // Deep Learning AI Vision Engine
+    formData.append('scale', 'true');
+    formData.append('isTable', 'true');
+    formData.append('detectOrientation', 'true');
+
+    const response = await fetch('https://api.ocr.space/parse/image', {
+      method: 'POST',
+      body: formData,
+    });
+
+    const data = await response.json();
+
+    if (data && data.ParsedResults && data.ParsedResults.length > 0) {
+      const parsedText = data.ParsedResults[0].ParsedText || '';
+      console.log('[AI INVOICE OCR RAW TEXT]:', parsedText);
+
+      const invoiceData = parseInvoiceFromText(parsedText);
+      return res.json({ success: true, invoice: invoiceData, rawText: parsedText, engine: 'OCR.space Engine 2 AI' });
+    }
+
+    return res.status(422).json({ success: false, error: 'Could not read invoice content from photo' });
+  } catch (err) {
+    console.error('Invoice OCR API Endpoint Error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
+
