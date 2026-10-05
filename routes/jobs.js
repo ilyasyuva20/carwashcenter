@@ -330,5 +330,16 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
+router.delete('/:id', async (req, res) => {
+  try {
+    const jobId = req.params.id;
+    await db.prepare('DELETE FROM bills WHERE job_id = ?').run(jobId);
+    await db.prepare('DELETE FROM jobs WHERE id = ?').run(jobId);
+    res.json({ success: true, message: 'Job deleted successfully', id: Number(jobId) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
 module.exports.getJobFull = getJobFull;
