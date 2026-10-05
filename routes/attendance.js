@@ -92,13 +92,32 @@ router.post('/update', async (req, res) => {
   try {
     const { employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out } = req.body;
     const existing = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
-    if (existing) {
-      const newStatus = status !== undefined ? status : existing.status;
-      const newLate = late_minutes !== undefined ? Number(late_minutes) : existing.late_minutes;
-      const newOt = overtime_minutes !== undefined ? Number(overtime_minutes) : existing.overtime_minutes;
-      const newCin = check_in !== undefined ? check_in : existing.check_in;
-      const newCout = check_out !== undefined ? check_out : existing.check_out;
 
+    let newCin = check_in !== undefined ? check_in : (existing ? existing.check_in : null);
+    let newCout = check_out !== undefined ? check_out : (existing ? existing.check_out : null);
+    let newStatus = status !== undefined ? status : (existing ? existing.status : 'present');
+
+    // Calculate late_minutes: explicitly provided > computed from check_in > existing/0
+    let newLate;
+    if (late_minutes !== undefined) {
+      newLate = Number(late_minutes);
+    } else if (newCin) {
+      newLate = Math.max(0, toMinutes(newCin) - toMinutes(SHIFT_START));
+    } else {
+      newLate = existing ? existing.late_minutes : 0;
+    }
+
+    // Calculate overtime_minutes: explicitly provided > computed from check_out > existing/0
+    let newOt;
+    if (overtime_minutes !== undefined) {
+      newOt = Number(overtime_minutes);
+    } else if (newCout) {
+      newOt = Math.max(0, toMinutes(newCout) - toMinutes(SHIFT_END));
+    } else {
+      newOt = existing ? existing.overtime_minutes : 0;
+    }
+
+    if (existing) {
       await db.prepare(`
         UPDATE attendance 
         SET status = ?, late_minutes = ?, overtime_minutes = ?, check_in = ?, check_out = ?
@@ -108,15 +127,7 @@ router.post('/update', async (req, res) => {
       await db.prepare(`
         INSERT INTO attendance (employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        employee_id,
-        date,
-        status || 'present',
-        late_minutes !== undefined ? Number(late_minutes) : 0,
-        overtime_minutes !== undefined ? Number(overtime_minutes) : 0,
-        check_in || null,
-        check_out || null
-      );
+      `).run(employee_id, date, newStatus, newLate, newOt, newCin, newCout);
     }
     const result = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
     res.json(result);
@@ -126,4 +137,5 @@ router.post('/update', async (req, res) => {
 });
 
 module.exports = router;
+
 
