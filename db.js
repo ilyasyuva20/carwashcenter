@@ -60,9 +60,79 @@ if (usePostgres) {
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_name TEXT;
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS before_photos TEXT;
     ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offer_price REAL;
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS paid_amount REAL DEFAULT 0;
     ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT;
     ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS year TEXT;
     ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS owner_name TEXT;
+
+    CREATE TABLE IF NOT EXISTS suppliers (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      company_name TEXT,
+      category TEXT NOT NULL DEFAULT 'Other',
+      gst TEXT,
+      location TEXT,
+      contact_number TEXT,
+      sales_person_name TEXT,
+      sales_person_number TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS supplier_purchases (
+      id SERIAL PRIMARY KEY,
+      supplier_id INTEGER NOT NULL,
+      item_details TEXT,
+      category TEXT,
+      total_amount REAL NOT NULL DEFAULT 0,
+      paid_amount REAL NOT NULL DEFAULT 0,
+      pending_amount REAL NOT NULL DEFAULT 0,
+      payment_method TEXT DEFAULT 'cash',
+      date TEXT NOT NULL,
+      note TEXT,
+      expense_id INTEGER,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS supplier_payments (
+      id SERIAL PRIMARY KEY,
+      supplier_id INTEGER NOT NULL,
+      purchase_id INTEGER,
+      amount REAL NOT NULL DEFAULT 0,
+      payment_method TEXT DEFAULT 'cash',
+      date TEXT NOT NULL,
+      note TEXT,
+      expense_id INTEGER,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id SERIAL PRIMARY KEY,
+      customer_id INTEGER NOT NULL,
+      plan_name TEXT NOT NULL DEFAULT 'Monthly Wash Package',
+      price REAL NOT NULL DEFAULT 0,
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      max_washes INTEGER DEFAULT -1,
+      washes_used INTEGER DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active',
+      payment_method TEXT DEFAULT 'cash',
+      notes TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS subscription_vehicles (
+      id SERIAL PRIMARY KEY,
+      subscription_id INTEGER NOT NULL,
+      vehicle_id INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS subscription_washes (
+      id SERIAL PRIMARY KEY,
+      subscription_id INTEGER NOT NULL,
+      job_id INTEGER,
+      vehicle_id INTEGER,
+      wash_date TEXT NOT NULL
+    );
   `).catch(err => console.error("Postgres migration error:", err.message));
 
   module.exports = db;
@@ -83,17 +153,24 @@ if (usePostgres) {
     CREATE TABLE IF NOT EXISTS vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, reg_number TEXT UNIQUE NOT NULL, brand TEXT, model TEXT, segment TEXT, color TEXT, year TEXT, customer_id INTEGER);
     CREATE TABLE IF NOT EXISTS wash_types (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
     CREATE TABLE IF NOT EXISTS pricing (id INTEGER PRIMARY KEY AUTOINCREMENT, wash_type_id INTEGER NOT NULL, segment TEXT NOT NULL, price REAL NOT NULL, UNIQUE(wash_type_id, segment));
-    CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER NOT NULL DEFAULT 1, vehicle_id INTEGER NOT NULL, wash_type_id INTEGER NOT NULL, entry_time TEXT NOT NULL, exit_time TEXT, eta_minutes INTEGER DEFAULT 30, status TEXT NOT NULL DEFAULT 'in_progress', has_chain_lube INTEGER DEFAULT 0, chain_lube_price REAL DEFAULT 0, customer_type TEXT DEFAULT 'normal', workshop_id INTEGER, payment_status TEXT DEFAULT 'unsettled', customer_name TEXT, before_photos TEXT);
+    CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER NOT NULL DEFAULT 1, vehicle_id INTEGER NOT NULL, wash_type_id INTEGER NOT NULL, entry_time TEXT NOT NULL, exit_time TEXT, eta_minutes INTEGER DEFAULT 30, status TEXT NOT NULL DEFAULT 'in_progress', has_chain_lube INTEGER DEFAULT 0, chain_lube_price REAL DEFAULT 0, customer_type TEXT DEFAULT 'normal', workshop_id INTEGER, payment_status TEXT DEFAULT 'unsettled', customer_name TEXT, before_photos TEXT, offer_price REAL, paid_amount REAL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS bills (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER UNIQUE NOT NULL, amount REAL NOT NULL, discount_amount REAL NOT NULL DEFAULT 0, final_amount REAL NOT NULL, payment_method TEXT, reward_points_earned INTEGER NOT NULL DEFAULT 0, reward_points_redeemed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'unpaid', paid_at TEXT);
     CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, branch_id INTEGER NOT NULL DEFAULT 1, category TEXT NOT NULL, amount REAL NOT NULL, note TEXT, date TEXT NOT NULL, payment_method TEXT DEFAULT 'gpay');
     CREATE TABLE IF NOT EXISTS daily_opening_balances (date TEXT PRIMARY KEY, opening_cash REAL NOT NULL DEFAULT 0, opening_gpay REAL NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS workshops (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, address TEXT, phone TEXT, owner_name TEXT, owner_phone TEXT, type TEXT NOT NULL DEFAULT 'Car Workshop', created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS workshop_pricing (id INTEGER PRIMARY KEY AUTOINCREMENT, workshop_id INTEGER, wash_type_id INTEGER NOT NULL, segment TEXT NOT NULL, price REAL NOT NULL, UNIQUE(workshop_id, wash_type_id, segment));
+    CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, company_name TEXT, category TEXT NOT NULL DEFAULT 'Other', gst TEXT, location TEXT, contact_number TEXT, sales_person_name TEXT, sales_person_number TEXT, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS supplier_purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, supplier_id INTEGER NOT NULL, item_details TEXT, category TEXT, total_amount REAL NOT NULL DEFAULT 0, paid_amount REAL NOT NULL DEFAULT 0, pending_amount REAL NOT NULL DEFAULT 0, payment_method TEXT DEFAULT 'cash', date TEXT NOT NULL, note TEXT, expense_id INTEGER, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS supplier_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, supplier_id INTEGER NOT NULL, purchase_id INTEGER, amount REAL NOT NULL DEFAULT 0, payment_method TEXT DEFAULT 'cash', date TEXT NOT NULL, note TEXT, expense_id INTEGER, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL, plan_name TEXT NOT NULL DEFAULT 'Monthly Wash Package', price REAL NOT NULL DEFAULT 0, start_date TEXT NOT NULL, end_date TEXT NOT NULL, max_washes INTEGER DEFAULT -1, washes_used INTEGER DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', payment_method TEXT DEFAULT 'cash', notes TEXT, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS subscription_vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, subscription_id INTEGER NOT NULL, vehicle_id INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS subscription_washes (id INTEGER PRIMARY KEY AUTOINCREMENT, subscription_id INTEGER NOT NULL, job_id INTEGER, vehicle_id INTEGER, wash_date TEXT NOT NULL);
   `);
 
   try { db.exec('ALTER TABLE jobs ADD COLUMN customer_name TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE jobs ADD COLUMN before_photos TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE jobs ADD COLUMN offer_price REAL'); } catch(e){}
+  try { db.exec('ALTER TABLE jobs ADD COLUMN paid_amount REAL DEFAULT 0'); } catch(e){}
   try { db.exec('ALTER TABLE customers ADD COLUMN name TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE vehicles ADD COLUMN year TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE vehicles ADD COLUMN owner_name TEXT'); } catch(e){}

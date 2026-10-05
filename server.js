@@ -22,6 +22,8 @@ app.use('/api/bills', require('./routes/bills'));
 app.use('/api/expenses', require('./routes/expenses'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/workshops', require('./routes/workshops'));
+app.use('/api/suppliers', require('./routes/suppliers'));
+app.use('/api/subscriptions', require('./routes/subscriptions'));
 app.use('/api/ocr', require('./routes/ocr'));
 
 // Serve static frontend build if dist directory exists

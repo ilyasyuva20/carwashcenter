@@ -93,4 +93,121 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Create new customer with multiple vehicles
+router.post('/', async (req, res) => {
+  try {
+    const { name, phone, vehicles } = req.body;
+    if (!name) return res.status(400).json({ error: 'Customer name is required' });
+
+    let customer = null;
+    if (phone && phone.trim()) {
+      customer = await db.prepare('SELECT * FROM customers WHERE phone = ?').get(phone.trim());
+    }
+
+    if (!customer) {
+      const stmt = await db.prepare('INSERT INTO customers (name, phone, reward_points) VALUES (?, ?, ?)').run(
+        name.trim(),
+        phone ? phone.trim() : '',
+        0
+      );
+      customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(stmt.lastInsertRowid);
+    } else {
+      await db.prepare('UPDATE customers SET name = ? WHERE id = ?').run(name.trim(), customer.id);
+      customer.name = name.trim();
+    }
+
+    const createdVehicles = [];
+
+    if (vehicles && Array.isArray(vehicles)) {
+      for (const v of vehicles) {
+        if (!v.reg_number || !v.reg_number.trim()) continue;
+        const regUpper = v.reg_number.trim().toUpperCase();
+
+        let existingVeh = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regUpper);
+        if (existingVeh) {
+          await db.prepare(`
+            UPDATE vehicles SET customer_id = ?, brand = ?, model = ?, segment = ?, owner_name = ? WHERE id = ?
+          `).run(
+            customer.id,
+            v.brand || existingVeh.brand || '',
+            v.model || existingVeh.model || '',
+            v.segment || existingVeh.segment || 'hatchback',
+            customer.name,
+            existingVeh.id
+          );
+          const updated = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(existingVeh.id);
+          createdVehicles.push(updated);
+        } else {
+          const vStmt = await db.prepare(`
+            INSERT INTO vehicles (reg_number, brand, model, segment, color, year, customer_id, owner_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            regUpper,
+            v.brand || '',
+            v.model || '',
+            v.segment || 'hatchback',
+            '',
+            '',
+            customer.id,
+            customer.name
+          );
+          const newV = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(vStmt.lastInsertRowid);
+          createdVehicles.push(newV);
+        }
+      }
+    }
+
+    res.json({ ok: true, customer, vehicles: createdVehicles });
+  } catch (err) {
+    console.error('Error creating customer:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add a vehicle to an existing customer
+router.post('/:id/vehicles', async (req, res) => {
+  try {
+    const customerId = req.params.id;
+    const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(customerId);
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const { reg_number, brand, model, segment } = req.body;
+    if (!reg_number || !reg_number.trim()) return res.status(400).json({ error: 'Vehicle registration number is required' });
+
+    const regUpper = reg_number.trim().toUpperCase();
+
+    let vehicle = await db.prepare('SELECT * FROM vehicles WHERE reg_number = ?').get(regUpper);
+    if (vehicle) {
+      await db.prepare(`
+        UPDATE vehicles SET customer_id = ?, brand = ?, model = ?, segment = ?, owner_name = ? WHERE id = ?
+      `).run(
+        customerId,
+        brand || vehicle.brand || '',
+        model || vehicle.model || '',
+        segment || vehicle.segment || 'hatchback',
+        customer.name,
+        vehicle.id
+      );
+      vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(vehicle.id);
+    } else {
+      const stmt = await db.prepare(`
+        INSERT INTO vehicles (reg_number, brand, model, segment, customer_id, owner_name)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        regUpper,
+        brand || '',
+        model || '',
+        segment || 'hatchback',
+        customerId,
+        customer.name
+      );
+      vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(stmt.lastInsertRowid);
+    }
+
+    res.json({ ok: true, vehicle });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

@@ -597,12 +597,12 @@ router.get('/workshop-summary', async (req, res) => {
       else overallBikes++;
 
       const price = Number(job.price) || 0;
+      const paid = job.payment_status === 'settled' ? price : Math.min(price, Number(job.paid_amount || 0));
+      const unpaid = Math.max(0, price - paid);
+
       overallAmount += price;
-      if (job.payment_status === 'settled') {
-        overallPaid += price;
-      } else {
-        overallUnpaid += price;
-      }
+      overallPaid += paid;
+      overallUnpaid += unpaid;
 
       if (job.workshop_id && workshopMap[job.workshop_id]) {
         const w = workshopMap[job.workshop_id];
@@ -611,11 +611,8 @@ router.get('/workshop-summary', async (req, res) => {
         if (isCar) w.cars_count++;
         else w.bikes_count++;
         w.total_amount += price;
-        if (job.payment_status === 'settled') {
-          w.paid_amount += price;
-        } else {
-          w.unpaid_amount += price;
-        }
+        w.paid_amount += paid;
+        w.unpaid_amount += unpaid;
       } else if (!job.workshop_id) {
         unassignedJobs.push(job);
       }
@@ -654,12 +651,12 @@ router.post('/settle-job', async (req, res) => {
     }
     const now = paidAt.toISOString();
 
-    await db.prepare("UPDATE jobs SET payment_status = 'settled' WHERE id = ?").run(job.id);
+    await db.prepare("UPDATE jobs SET payment_status = 'settled', paid_amount = ? WHERE id = ?").run(job.price, job.id);
 
     const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
     if (existingBill) {
-      await db.prepare("UPDATE bills SET status = 'paid', payment_method = ?, paid_at = ? WHERE id = ?")
-        .run(payMethod, now, existingBill.id);
+      await db.prepare("UPDATE bills SET status = 'paid', final_amount = ?, payment_method = ?, paid_at = ? WHERE id = ?")
+        .run(job.price, payMethod, now, existingBill.id);
     } else {
       await db.prepare(`
         INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
@@ -674,46 +671,89 @@ router.post('/settle-job', async (req, res) => {
   }
 });
 
-// Bulk workshop settlement endpoint
+// Workshop settlement endpoint (Full or Part Settlement)
 router.post('/settle-workshop', async (req, res) => {
   try {
-    const { job_ids, payment_method, itemized_payments } = req.body;
-    if (!Array.isArray(job_ids) || job_ids.length === 0) {
-      return res.status(400).json({ error: 'job_ids array is required' });
+    const { workshop_id, job_ids, payment_method, settlement_type, amount } = req.body;
+
+    let targetJobs = [];
+    if (Array.isArray(job_ids) && job_ids.length > 0) {
+      for (const id of job_ids) {
+        const j = await getJobFull(id);
+        if (j && j.payment_status !== 'settled') {
+          targetJobs.push(j);
+        }
+      }
+    } else if (workshop_id) {
+      const rawJobs = await db.prepare("SELECT id FROM jobs WHERE customer_type = 'workshop' AND workshop_id = ? AND (payment_status != 'settled' OR payment_status IS NULL) ORDER BY id ASC").all(workshop_id);
+      targetJobs = (await Promise.all(rawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
     }
+
+    if (targetJobs.length === 0) {
+      return res.status(400).json({ error: 'No unsettled jobs found for this workshop' });
+    }
+
+    // Sort jobs by ID ascending (FIFO: oldest jobs settled first)
+    targetJobs.sort((a, b) => a.id - b.id);
+
+    let totalUnpaid = 0;
+    targetJobs.forEach(j => {
+      const jobPrice = Number(j.price) || 0;
+      const jobPaid = j.payment_status === 'settled' ? jobPrice : Number(j.paid_amount || 0);
+      totalUnpaid += Math.max(0, jobPrice - jobPaid);
+    });
 
     const defaultMethod = payment_method || 'cash';
     const now = new Date().toISOString();
-    let settledCount = 0;
+
+    let payAmount = totalUnpaid;
+    if (settlement_type === 'part' && amount !== undefined && !isNaN(Number(amount)) && Number(amount) > 0) {
+      payAmount = Math.min(totalUnpaid, Number(amount));
+    }
+
+    let remainingToDistribute = payAmount;
     let totalSettledAmount = 0;
+    let settledCount = 0;
 
-    for (const id of job_ids) {
-      const job = await getJobFull(id);
-      if (!job) continue;
+    for (const job of targetJobs) {
+      if (remainingToDistribute <= 0) break;
 
-      const method = (itemized_payments && itemized_payments[id]) ? itemized_payments[id] : defaultMethod;
+      const jobPrice = Number(job.price) || 0;
+      const currentPaid = job.payment_status === 'settled' ? jobPrice : Number(job.paid_amount || 0);
+      const needed = Math.max(0, jobPrice - currentPaid);
 
-      await db.prepare("UPDATE jobs SET payment_status = 'settled' WHERE id = ?").run(job.id);
+      if (needed <= 0) continue;
+
+      const chunk = Math.min(remainingToDistribute, needed);
+      const newPaid = currentPaid + chunk;
+      remainingToDistribute -= chunk;
+      totalSettledAmount += chunk;
+
+      const isFullyPaid = newPaid >= jobPrice;
+      const newPayStatus = isFullyPaid ? 'settled' : 'partial';
+
+      await db.prepare("UPDATE jobs SET payment_status = ?, paid_amount = ? WHERE id = ?")
+        .run(newPayStatus, newPaid, job.id);
 
       const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
       if (existingBill) {
-        await db.prepare("UPDATE bills SET status = 'paid', payment_method = ?, paid_at = ? WHERE id = ?")
-          .run(method, now, existingBill.id);
+        await db.prepare("UPDATE bills SET status = ?, final_amount = ?, payment_method = ?, paid_at = ? WHERE id = ?")
+          .run(isFullyPaid ? 'paid' : 'partial', newPaid, defaultMethod, now, existingBill.id);
       } else {
         await db.prepare(`
           INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-          VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
-        `).run(job.id, job.price, job.price, method, now);
+          VALUES (?, ?, 0, ?, ?, 0, 0, ?, ?)
+        `).run(job.id, jobPrice, newPaid, defaultMethod, isFullyPaid ? 'paid' : 'partial', now);
       }
 
       settledCount++;
-      totalSettledAmount += (Number(job.price) || 0);
     }
 
     res.json({
       ok: true,
       settled_count: settledCount,
-      total_amount: totalSettledAmount
+      amount_paid: totalSettledAmount,
+      remaining_unpaid: Math.max(0, totalUnpaid - totalSettledAmount)
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

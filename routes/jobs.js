@@ -101,6 +101,10 @@ async function getJobFull(id) {
     ? Number(job.offer_price)
     : washPrice + lubePrice;
 
+  const effectiveWashPrice = job.offer_price !== null && job.offer_price !== undefined
+    ? Math.max(0, Number(job.offer_price) - lubePrice)
+    : washPrice;
+
   let workshop = null;
   const cleanWIdForSelect = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
   if (cleanWIdForSelect) {
@@ -109,6 +113,7 @@ async function getJobFull(id) {
 
   const washType = await db.prepare('SELECT * FROM wash_types WHERE id = ?').get(job.wash_type_id);
   const bill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
+  const paidAmount = job.payment_status === 'settled' ? totalPrice : (Number(job.paid_amount) || 0);
   return {
     ...job,
     customer_name: job.customer_name || '',
@@ -116,7 +121,8 @@ async function getJobFull(id) {
     vehicle,
     wash_type: washType,
     price: totalPrice,
-    wash_price: washPrice,
+    paid_amount: paidAmount,
+    wash_price: effectiveWashPrice,
     chain_lube_price: lubePrice,
     workshop: workshop || null,
     bill: bill || null
@@ -200,6 +206,13 @@ router.post('/', async (req, res) => {
     ).run(vehicle.id, cleanWashTypeId, nowISO(), Number(eta_minutes) || 30, 'in_progress', chainLube, lubePrice, parsedOfferPrice, custType, wId, payStatus, custName, photosJson);
 
     const fullJob = await getJobFull(info.lastInsertRowid);
+    if (payStatus === 'settled') {
+      await db.prepare(`
+        INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
+        VALUES (?, ?, 0, ?, 'cash', 0, 0, 'paid', ?)
+      `).run(fullJob.id, fullJob.price, fullJob.price, nowISO());
+    }
+
     res.json(fullJob);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -275,6 +288,19 @@ router.put('/:id', async (req, res) => {
     ).run(newStatus, exitTime, newPayStatus, newCustType, newWId, newOfferPrice, job.id);
 
     const fullJob = await getJobFull(job.id);
+
+    if (newPayStatus === 'settled') {
+      const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
+      if (existingBill) {
+        await db.prepare("UPDATE bills SET status = 'paid', amount = ?, final_amount = ? WHERE id = ?")
+          .run(fullJob.price, fullJob.price, existingBill.id);
+      } else {
+        await db.prepare(`
+          INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
+          VALUES (?, ?, 0, ?, 'cash', 0, 0, 'paid', ?)
+        `).run(job.id, fullJob.price, fullJob.price, nowISO());
+      }
+    }
     res.json(fullJob);
   } catch (err) {
     res.status(500).json({ error: err.message });
