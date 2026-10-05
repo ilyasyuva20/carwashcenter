@@ -315,7 +315,7 @@ router.post('/adjust-amount', async (req, res) => {
     await db.prepare('UPDATE jobs SET offer_price = ? WHERE id = ?').run(amountNum, job.id);
 
     const bill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
-    if (bill && bill.status !== 'paid') {
+    if (bill) {
       const discount = Number(bill.discount_amount) || 0;
       const finalAmt = Math.max(0, amountNum - discount);
       await db.prepare('UPDATE bills SET amount = ?, final_amount = ? WHERE id = ?').run(amountNum, finalAmt, bill.id);
