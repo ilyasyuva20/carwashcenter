@@ -289,17 +289,16 @@ router.put('/:id', async (req, res) => {
 
     const fullJob = await getJobFull(job.id);
 
-    if (newPayStatus === 'settled') {
-      const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
-      if (existingBill) {
-        await db.prepare("UPDATE bills SET status = 'paid', amount = ?, final_amount = ? WHERE id = ?")
-          .run(fullJob.price, fullJob.price, existingBill.id);
-      } else {
-        await db.prepare(`
-          INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-          VALUES (?, ?, 0, ?, 'cash', 0, 0, 'paid', ?)
-        `).run(job.id, fullJob.price, fullJob.price, nowISO());
-      }
+    const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
+    if (existingBill) {
+      const newBillStatus = newPayStatus === 'settled' ? 'paid' : (existingBill.status || 'unpaid');
+      await db.prepare("UPDATE bills SET amount = ?, final_amount = ?, status = ? WHERE id = ?")
+        .run(fullJob.price, fullJob.price, newBillStatus, existingBill.id);
+    } else if (newPayStatus === 'settled') {
+      await db.prepare(`
+        INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
+        VALUES (?, ?, 0, ?, 'cash', 0, 0, 'paid', ?)
+      `).run(job.id, fullJob.price, fullJob.price, nowISO());
     }
     res.json(fullJob);
   } catch (err) {
