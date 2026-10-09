@@ -208,7 +208,12 @@ router.post('/', async (req, res) => {
       offer_price,
       customer_type,
       workshop_id,
-      payment_status
+      payment_status,
+      payment_method,
+      status,
+      entry_time,
+      exit_time,
+      completed_at
     } = req.body;
 
     if (!reg_number) {
@@ -265,16 +270,38 @@ router.post('/', async (req, res) => {
       photosJson = JSON.stringify(before_photos);
     }
 
+    // Determine custom timestamps & status for backdated jobs
+    let jobEntryTime = nowISO();
+    if (entry_time) {
+      const dt = new Date(entry_time);
+      if (!isNaN(dt.getTime())) jobEntryTime = dt.toISOString();
+    }
+
+    const jobStatus = (status === 'completed' || completed_at) ? 'completed' : 'in_progress';
+    let jobExitTime = null;
+    if (jobStatus === 'completed') {
+      if (exit_time || completed_at) {
+        const dtExit = new Date(exit_time || completed_at);
+        if (!isNaN(dtExit.getTime())) jobExitTime = dtExit.toISOString();
+        else jobExitTime = jobEntryTime;
+      } else {
+        jobExitTime = jobEntryTime;
+      }
+    }
+
     const info = await db.prepare(
-      'INSERT INTO jobs (vehicle_id, wash_type_id, entry_time, eta_minutes, status, has_chain_lube, chain_lube_price, offer_price, customer_type, workshop_id, payment_status, customer_name, before_photos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(vehicle.id, cleanWashTypeId, nowISO(), Number(eta_minutes) || 30, 'in_progress', chainLube, lubePrice, parsedOfferPrice, custType, wId, payStatus, custName, photosJson);
+      'INSERT INTO jobs (vehicle_id, wash_type_id, entry_time, exit_time, eta_minutes, status, has_chain_lube, chain_lube_price, offer_price, customer_type, workshop_id, payment_status, customer_name, before_photos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(vehicle.id, cleanWashTypeId, jobEntryTime, jobExitTime, Number(eta_minutes) || 30, jobStatus, chainLube, lubePrice, parsedOfferPrice, custType, wId, payStatus, custName, photosJson);
 
     const fullJob = await getJobFull(info.lastInsertRowid);
+    const payMethod = (payment_method || 'cash').toLowerCase();
+
     if (payStatus === 'settled') {
+      const paidAtTime = jobExitTime || jobEntryTime;
       await db.prepare(`
         INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-        VALUES (?, ?, 0, ?, 'cash', 0, 0, 'paid', ?)
-      `).run(fullJob.id, fullJob.price, fullJob.price, nowISO());
+        VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
+      `).run(fullJob.id, fullJob.price, fullJob.price, payMethod, paidAtTime);
     }
 
     res.json(fullJob);
