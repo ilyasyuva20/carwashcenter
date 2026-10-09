@@ -175,5 +175,23 @@ if (usePostgres) {
   try { db.exec('ALTER TABLE vehicles ADD COLUMN year TEXT'); } catch(e){}
   try { db.exec('ALTER TABLE vehicles ADD COLUMN owner_name TEXT'); } catch(e){}
 
+  // Database Performance Indexes
+  try {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_jobs_customer_status ON jobs(customer_type, status, payment_status);
+      CREATE INDEX IF NOT EXISTS idx_jobs_vehicle_id ON jobs(vehicle_id);
+      CREATE INDEX IF NOT EXISTS idx_jobs_workshop_id ON jobs(workshop_id);
+      CREATE INDEX IF NOT EXISTS idx_jobs_entry_time ON jobs(entry_time);
+      CREATE INDEX IF NOT EXISTS idx_jobs_exit_time ON jobs(exit_time);
+      CREATE INDEX IF NOT EXISTS idx_bills_job_id ON bills(job_id);
+      CREATE INDEX IF NOT EXISTS idx_bills_status ON bills(status);
+      CREATE INDEX IF NOT EXISTS idx_vehicles_reg ON vehicles(reg_number);
+      CREATE INDEX IF NOT EXISTS idx_vehicles_customer ON vehicles(customer_id);
+      CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+    `);
+  } catch (e) {
+    console.error("Index creation error:", e);
+  }
+
   module.exports = db;
 }

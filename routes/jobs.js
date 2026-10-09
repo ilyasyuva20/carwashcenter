@@ -36,97 +36,161 @@ router.post('/upload-before-photo', upload.single('photo'), (req, res) => {
   }
 });
 
-async function getJobFull(id) {
-  const job = await db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
-  if (!job) return null;
-  const vehicle = await db.prepare('SELECT * FROM vehicles WHERE id = ?').get(job.vehicle_id);
-  if (vehicle && vehicle.customer_id) {
-    const customer = await db.prepare('SELECT * FROM customers WHERE id = ?').get(vehicle.customer_id);
-    if (customer && customer.phone) {
-      vehicle.phone = customer.phone;
-    }
-    if (customer && customer.name && !job.customer_name) {
-      job.customer_name = customer.name;
-    }
+async function getJobsFullBatch(jobsOrIds) {
+  if (!jobsOrIds || !Array.isArray(jobsOrIds) || jobsOrIds.length === 0) {
+    return [];
   }
 
-  let beforePhotosArr = [];
-  if (job.before_photos) {
-    try {
-      const rawArr = typeof job.before_photos === 'string' ? JSON.parse(job.before_photos) : job.before_photos;
-      if (Array.isArray(rawArr)) {
-        beforePhotosArr = rawArr.map(url => {
-          if (typeof url === 'string' && url.startsWith('/uploads/')) {
-            return `https://carwashapp-xwz9.onrender.com${url}`;
-          }
-          return url;
-        });
-      }
-    } catch(e) {
-      beforePhotosArr = [];
-    }
-  }
-
-  let washPrice = 0;
-  const segment = vehicle ? vehicle.segment : '';
-
-  if (job.customer_type === 'workshop') {
-    // 1. Try specific workshop pricing
-    let wpObj = null;
-    const cleanWId = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
-    if (cleanWId) {
-      wpObj = await db.prepare('SELECT price FROM workshop_pricing WHERE workshop_id = ? AND wash_type_id = ? AND segment = ?')
-        .get(cleanWId, job.wash_type_id, segment);
-    }
-    // 2. Try default workshop pricing
-    if (!wpObj) {
-      wpObj = await db.prepare('SELECT price FROM workshop_pricing WHERE workshop_id IS NULL AND wash_type_id = ? AND segment = ?')
-        .get(job.wash_type_id, segment);
-    }
-    // 3. Fallback to normal pricing
-    if (!wpObj) {
-      wpObj = await db.prepare('SELECT price FROM pricing WHERE wash_type_id = ? AND segment = ?')
-        .get(job.wash_type_id, segment);
-    }
-    washPrice = wpObj ? Number(wpObj.price) : (segment === 'scooter' ? 250 : (segment === 'bike' ? 250 : 0));
+  let rawJobs = [];
+  const sample = jobsOrIds[0];
+  if (typeof sample === 'object' && sample !== null && sample.id) {
+    rawJobs = jobsOrIds;
   } else {
-    // Normal Customer Pricing
-    const basePriceObj = await db.prepare('SELECT price FROM pricing WHERE wash_type_id = ? AND segment = ?')
-      .get(job.wash_type_id, segment);
-    washPrice = basePriceObj ? Number(basePriceObj.price) : (segment === 'scooter' ? 250 : (segment === 'bike' ? 250 : 0));
+    const ids = jobsOrIds.map(Number).filter(n => Number.isInteger(n));
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    rawJobs = await db.prepare(`SELECT * FROM jobs WHERE id IN (${placeholders}) ORDER BY id DESC`).all(...ids);
   }
 
-  const lubePrice = job.has_chain_lube ? (Number(job.chain_lube_price) || 150) : 0;
-  const totalPrice = job.offer_price !== null && job.offer_price !== undefined
-    ? Number(job.offer_price)
-    : washPrice + lubePrice;
+  if (rawJobs.length === 0) return [];
 
-  const effectiveWashPrice = job.offer_price !== null && job.offer_price !== undefined
-    ? Math.max(0, Number(job.offer_price) - lubePrice)
-    : washPrice;
+  const vehicleIds = [...new Set(rawJobs.map(j => j.vehicle_id).filter(Boolean))];
+  const workshopIds = [...new Set(rawJobs.map(j => j.workshop_id).filter(id => id && id !== 'null' && !isNaN(Number(id))).map(Number))];
+  const jobIds = rawJobs.map(j => j.id);
 
-  let workshop = null;
-  const cleanWIdForSelect = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
-  if (cleanWIdForSelect) {
-    workshop = await db.prepare('SELECT * FROM workshops WHERE id = ?').get(cleanWIdForSelect);
-  }
+  const vehiclesPromise = vehicleIds.length > 0
+    ? db.prepare(`SELECT * FROM vehicles WHERE id IN (${vehicleIds.map(() => '?').join(',')})`).all(...vehicleIds)
+    : Promise.resolve([]);
 
-  const washType = await db.prepare('SELECT * FROM wash_types WHERE id = ?').get(job.wash_type_id);
-  const bill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
-  const paidAmount = job.payment_status === 'settled' ? totalPrice : (Number(job.paid_amount) || 0);
-  return {
-    ...job,
-    customer_name: job.customer_name || '',
-    before_photos: beforePhotosArr,
-    vehicle,
-    wash_type: washType,
-    price: totalPrice,
-    paid_amount: paidAmount,
-    wash_price: effectiveWashPrice,
-    chain_lube_price: lubePrice,
-    workshop: workshop || null,
-    bill: bill || null
-  };
+  const washTypesPromise = db.prepare('SELECT * FROM wash_types').all();
+  const workshopsPromise = db.prepare('SELECT * FROM workshops').all();
+  const pricingPromise = db.prepare('SELECT * FROM pricing').all();
+  const workshopPricingPromise = db.prepare('SELECT * FROM workshop_pricing').all();
+  const billsPromise = jobIds.length > 0
+    ? db.prepare(`SELECT * FROM bills WHERE job_id IN (${jobIds.map(() => '?').join(',')})`).all(...jobIds)
+    : Promise.resolve([]);
+
+  const [
+    vehiclesList,
+    washTypesList,
+    workshopsList,
+    pricingList,
+    workshopPricingList,
+    billsList
+  ] = await Promise.all([
+    vehiclesPromise,
+    washTypesPromise,
+    workshopsPromise,
+    pricingPromise,
+    workshopPricingPromise,
+    billsPromise
+  ]);
+
+  const customerIds = [...new Set(vehiclesList.map(v => v.customer_id).filter(Boolean))];
+  const customersList = customerIds.length > 0
+    ? await db.prepare(`SELECT * FROM customers WHERE id IN (${customerIds.map(() => '?').join(',')})`).all(...customerIds)
+    : [];
+
+  const vehicleMap = new Map(vehiclesList.map(v => [v.id, { ...v }]));
+  const customerMap = new Map(customersList.map(c => [c.id, c]));
+  const washTypeMap = new Map(washTypesList.map(w => [w.id, w]));
+  const workshopMap = new Map(workshopsList.map(w => [w.id, w]));
+  const billMap = new Map(billsList.map(b => [b.job_id, b]));
+
+  const pricingMap = new Map();
+  pricingList.forEach(p => pricingMap.set(`${p.wash_type_id}_${p.segment}`, Number(p.price)));
+
+  const workshopPricingMap = new Map();
+  const defaultWorkshopPricingMap = new Map();
+  workshopPricingList.forEach(wp => {
+    if (wp.workshop_id) {
+      workshopPricingMap.set(`${wp.workshop_id}_${wp.wash_type_id}_${wp.segment}`, Number(wp.price));
+    } else {
+      defaultWorkshopPricingMap.set(`${wp.wash_type_id}_${wp.segment}`, Number(wp.price));
+    }
+  });
+
+  return rawJobs.map(job => {
+    const vehicle = vehicleMap.get(job.vehicle_id) ? { ...vehicleMap.get(job.vehicle_id) } : null;
+    if (vehicle && vehicle.customer_id) {
+      const customer = customerMap.get(vehicle.customer_id);
+      if (customer && customer.phone) vehicle.phone = customer.phone;
+      if (customer && customer.name && !job.customer_name) job.customer_name = customer.name;
+    }
+
+    let beforePhotosArr = [];
+    if (job.before_photos) {
+      try {
+        const rawArr = typeof job.before_photos === 'string' ? JSON.parse(job.before_photos) : job.before_photos;
+        if (Array.isArray(rawArr)) {
+          beforePhotosArr = rawArr.map(url => {
+            if (typeof url === 'string' && url.startsWith('/uploads/')) {
+              return `https://carwashapp-xwz9.onrender.com${url}`;
+            }
+            return url;
+          });
+        }
+      } catch (e) {
+        beforePhotosArr = [];
+      }
+    }
+
+    let washPrice = 0;
+    const segment = vehicle ? vehicle.segment : '';
+
+    if (job.customer_type === 'workshop') {
+      const cleanWId = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
+      if (cleanWId && workshopPricingMap.has(`${cleanWId}_${job.wash_type_id}_${segment}`)) {
+        washPrice = workshopPricingMap.get(`${cleanWId}_${job.wash_type_id}_${segment}`);
+      } else if (defaultWorkshopPricingMap.has(`${job.wash_type_id}_${segment}`)) {
+        washPrice = defaultWorkshopPricingMap.get(`${job.wash_type_id}_${segment}`);
+      } else if (pricingMap.has(`${job.wash_type_id}_${segment}`)) {
+        washPrice = pricingMap.get(`${job.wash_type_id}_${segment}`);
+      } else {
+        washPrice = segment === 'scooter' ? 250 : (segment === 'bike' ? 250 : 0);
+      }
+    } else {
+      if (pricingMap.has(`${job.wash_type_id}_${segment}`)) {
+        washPrice = pricingMap.get(`${job.wash_type_id}_${segment}`);
+      } else {
+        washPrice = segment === 'scooter' ? 250 : (segment === 'bike' ? 250 : 0);
+      }
+    }
+
+    const lubePrice = job.has_chain_lube ? (Number(job.chain_lube_price) || 150) : 0;
+    const totalPrice = job.offer_price !== null && job.offer_price !== undefined
+      ? Number(job.offer_price)
+      : washPrice + lubePrice;
+
+    const effectiveWashPrice = job.offer_price !== null && job.offer_price !== undefined
+      ? Math.max(0, Number(job.offer_price) - lubePrice)
+      : washPrice;
+
+    const cleanWIdForSelect = (job.workshop_id && job.workshop_id !== 'null' && !isNaN(Number(job.workshop_id))) ? Number(job.workshop_id) : null;
+    const workshop = cleanWIdForSelect ? (workshopMap.get(cleanWIdForSelect) || null) : null;
+    const washType = washTypeMap.get(job.wash_type_id) || null;
+    const bill = billMap.get(job.id) || null;
+    const paidAmount = job.payment_status === 'settled' ? totalPrice : (Number(job.paid_amount) || 0);
+
+    return {
+      ...job,
+      customer_name: job.customer_name || '',
+      before_photos: beforePhotosArr,
+      vehicle,
+      wash_type: washType,
+      price: totalPrice,
+      paid_amount: paidAmount,
+      wash_price: effectiveWashPrice,
+      chain_lube_price: lubePrice,
+      workshop,
+      bill
+    };
+  });
+}
+
+async function getJobFull(id) {
+  const jobs = await getJobsFullBatch([id]);
+  return jobs[0] || null;
 }
 
 // Create a job. Body: { reg_number, wash_type_id, eta_minutes, phone, customer_name, before_photos, has_chain_lube, chain_lube_price, offer_price, customer_type, workshop_id, payment_status }
@@ -228,7 +292,7 @@ router.get('/', async (req, res) => {
     if (customer_type) jobs = jobs.filter(j => j.customer_type === customer_type);
     if (date) jobs = jobs.filter(j => j.entry_time && j.entry_time.startsWith(date));
     
-    const fullJobs = await Promise.all(jobs.map(j => getJobFull(j.id)));
+    const fullJobs = await getJobsFullBatch(jobs);
     res.json(fullJobs);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -342,3 +406,4 @@ router.delete('/:id', async (req, res) => {
 
 module.exports = router;
 module.exports.getJobFull = getJobFull;
+module.exports.getJobsFullBatch = getJobsFullBatch;

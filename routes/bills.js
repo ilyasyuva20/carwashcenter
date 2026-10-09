@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { getJobFull } = require('./jobs');
+const { getJobFull, getJobsFullBatch } = require('./jobs');
 const puppeteer = require('puppeteer');
 
 const POINTS_PER_WASH = 10;
@@ -385,8 +385,8 @@ router.get('/', async (req, res) => {
       ORDER BY j.id DESC
     `).all();
 
-    // Fetch full job objects first so date & payment status match exact frontend definitions
-    let allJobs = (await Promise.all(allRawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
+    // Fetch full job objects in single batch query for maximum speed
+    let allJobs = (await getJobsFullBatch(allRawJobs)).filter(Boolean);
 
     // Helper to extract YYYY-MM-DD in local time matching frontend Completed Date display
     function getJobDateStr(j) {
@@ -563,7 +563,7 @@ router.get('/workshop-summary', async (req, res) => {
       rawJobs = rawJobs.filter(j => j.payment_status === payment_status);
     }
 
-    const fullJobs = (await Promise.all(rawJobs.map(j => getJobFull(j.id)))).filter(Boolean);
+    const fullJobs = (await getJobsFullBatch(rawJobs)).filter(Boolean);
 
     const workshopMap = {};
     workshops.forEach(w => {
