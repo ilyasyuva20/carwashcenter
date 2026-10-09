@@ -36,16 +36,23 @@ router.get('/', async (req, res) => {
 // Clock in
 router.post('/clock-in', async (req, res) => {
   try {
-    const { employee_id, date, time } = req.body;
-    const lateMin = Math.max(0, toMinutes(time) - toMinutes(SHIFT_START));
+    const { employee_id, date, time, shift_start } = req.body;
     const existing = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
+    const emp = await db.prepare('SELECT default_shift FROM employees WHERE id=?').get(employee_id);
+    const expectedShift = shift_start || (existing && existing.shift_start) || (emp && emp.default_shift) || '08:00';
+    if (shift_start) {
+      try {
+        await db.prepare('UPDATE employees SET default_shift = ? WHERE id = ?').run(shift_start, employee_id);
+      } catch (e) {}
+    }
+    const lateMin = Math.max(0, toMinutes(time) - toMinutes(expectedShift));
     if (existing) {
-      await db.prepare('UPDATE attendance SET check_in=?, late_minutes=?, status=? WHERE id=?')
-        .run(time, lateMin, 'present', existing.id);
+      await db.prepare('UPDATE attendance SET check_in=?, late_minutes=?, status=?, shift_start=? WHERE id=?')
+        .run(time, lateMin, 'present', expectedShift, existing.id);
     } else {
       await db.prepare(
-        'INSERT INTO attendance (employee_id, date, status, check_in, late_minutes) VALUES (?, ?, ?, ?, ?)'
-      ).run(employee_id, date, 'present', time, lateMin);
+        'INSERT INTO attendance (employee_id, date, status, check_in, late_minutes, shift_start) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(employee_id, date, 'present', time, lateMin, expectedShift);
     }
     const result = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
     res.json(result);
@@ -73,12 +80,19 @@ router.post('/clock-out', async (req, res) => {
 // Mark leave / absent / half-day manually
 router.post('/mark', async (req, res) => {
   try {
-    const { employee_id, date, status } = req.body; // status: leave, absent, half_day, present
+    const { employee_id, date, status, shift_start } = req.body; // status: leave, absent, half_day, present
     const existing = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
+    const emp = await db.prepare('SELECT default_shift FROM employees WHERE id=?').get(employee_id);
+    const expectedShift = shift_start || (existing && existing.shift_start) || (emp && emp.default_shift) || '08:00';
+    if (shift_start) {
+      try {
+        await db.prepare('UPDATE employees SET default_shift = ? WHERE id = ?').run(shift_start, employee_id);
+      } catch (e) {}
+    }
     if (existing) {
-      await db.prepare('UPDATE attendance SET status=? WHERE id=?').run(status, existing.id);
+      await db.prepare('UPDATE attendance SET status=?, shift_start=? WHERE id=?').run(status, expectedShift, existing.id);
     } else {
-      await db.prepare('INSERT INTO attendance (employee_id, date, status) VALUES (?, ?, ?)').run(employee_id, date, status);
+      await db.prepare('INSERT INTO attendance (employee_id, date, status, shift_start) VALUES (?, ?, ?, ?)').run(employee_id, date, status, expectedShift);
     }
     const result = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
     res.json(result);
@@ -87,24 +101,32 @@ router.post('/mark', async (req, res) => {
   }
 });
 
-// Update attendance record details (late_minutes, overtime_minutes, status, check_in, check_out)
+// Update attendance record details (late_minutes, overtime_minutes, status, check_in, check_out, shift_start)
 router.post('/update', async (req, res) => {
   try {
-    const { employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out } = req.body;
+    const { employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out, shift_start } = req.body;
     const existing = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
+    const emp = await db.prepare('SELECT default_shift FROM employees WHERE id=?').get(employee_id);
 
     let newCin = check_in !== undefined ? check_in : (existing ? existing.check_in : null);
     let newCout = check_out !== undefined ? check_out : (existing ? existing.check_out : null);
-    let newStatus = status !== undefined ? status : (existing ? existing.status : 'present');
+    let newStatus = status !== undefined ? status : (existing ? existing.status : (newCin ? 'present' : 'not_marked'));
+    let newShift = shift_start !== undefined ? shift_start : (existing && existing.shift_start ? existing.shift_start : ((emp && emp.default_shift) || '08:00'));
 
-    // Calculate late_minutes: explicitly provided > computed from check_in > existing/0
+    if (shift_start) {
+      try {
+        await db.prepare('UPDATE employees SET default_shift = ? WHERE id = ?').run(shift_start, employee_id);
+      } catch (e) {}
+    }
+
+    // Calculate late_minutes: explicitly provided > computed from check_in & shift_start > 0
     let newLate;
     if (late_minutes !== undefined) {
       newLate = Number(late_minutes);
-    } else if (newCin) {
-      newLate = Math.max(0, toMinutes(newCin) - toMinutes(SHIFT_START));
+    } else if (newCin && String(newCin).trim() !== '') {
+      newLate = Math.max(0, toMinutes(newCin) - toMinutes(newShift));
     } else {
-      newLate = existing ? existing.late_minutes : 0;
+      newLate = 0;
     }
 
     // Calculate overtime_minutes: explicitly provided > computed from check_out > existing/0
@@ -120,14 +142,14 @@ router.post('/update', async (req, res) => {
     if (existing) {
       await db.prepare(`
         UPDATE attendance 
-        SET status = ?, late_minutes = ?, overtime_minutes = ?, check_in = ?, check_out = ?
+        SET status = ?, late_minutes = ?, overtime_minutes = ?, check_in = ?, check_out = ?, shift_start = ?
         WHERE id = ?
-      `).run(newStatus, newLate, newOt, newCin, newCout, existing.id);
+      `).run(newStatus, newLate, newOt, newCin, newCout, newShift, existing.id);
     } else {
       await db.prepare(`
-        INSERT INTO attendance (employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(employee_id, date, newStatus, newLate, newOt, newCin, newCout);
+        INSERT INTO attendance (employee_id, date, status, late_minutes, overtime_minutes, check_in, check_out, shift_start)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(employee_id, date, newStatus, newLate, newOt, newCin, newCout, newShift);
     }
     const result = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(employee_id, date);
     res.json(result);

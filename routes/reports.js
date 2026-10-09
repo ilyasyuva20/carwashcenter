@@ -2,10 +2,27 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
+function getBillAmounts(b) {
+  const finalAmt = Number(b.final_amount) || 0;
+  if (b.payment_method === 'split') {
+    const cash = Number(b.cash_amount) || 0;
+    const gpay = Number(b.gpay_amount) || Math.max(0, finalAmt - cash);
+    return { cash, gpay };
+  } else if (b.payment_method === 'gpay') {
+    return { cash: 0, gpay: finalAmt };
+  } else {
+    return { cash: finalAmt, gpay: 0 };
+  }
+}
+
 async function summaryFor(date) {
   const bills = await db.prepare(`SELECT * FROM bills WHERE status='paid' AND paid_at LIKE ?`).all(`${date}%`);
-  const cash = bills.filter(b => b.payment_method === 'cash').reduce((s, b) => s + Number(b.final_amount), 0);
-  const gpay = bills.filter(b => b.payment_method === 'gpay').reduce((s, b) => s + Number(b.final_amount), 0);
+  let cash = 0, gpay = 0;
+  bills.forEach(b => {
+    const amt = getBillAmounts(b);
+    cash += amt.cash;
+    gpay += amt.gpay;
+  });
   const revenue = cash + gpay;
   
   const jobsTodayRow = await db.prepare(`SELECT COUNT(*) as c FROM jobs WHERE entry_time LIKE ?`).get(`${date}%`);
@@ -24,8 +41,12 @@ async function ledgerFor(date) {
   const op = (await db.prepare('SELECT opening_cash, opening_gpay FROM daily_opening_balances WHERE date = ?').get(date)) || { opening_cash: 0, opening_gpay: 0 };
   
   const bills = await db.prepare(`SELECT * FROM bills WHERE status='paid' AND paid_at LIKE ?`).all(`${date}%`);
-  const cashSales = bills.filter(b => b.payment_method === 'cash').reduce((s, b) => s + Number(b.final_amount), 0);
-  const gpaySales = bills.filter(b => b.payment_method === 'gpay').reduce((s, b) => s + Number(b.final_amount), 0);
+  let cashSales = 0, gpaySales = 0;
+  bills.forEach(b => {
+    const amt = getBillAmounts(b);
+    cashSales += amt.cash;
+    gpaySales += amt.gpay;
+  });
   const totalSales = cashSales + gpaySales;
 
   const expenses = await db.prepare(`SELECT * FROM expenses WHERE date = ? ORDER BY id DESC`).all(date);
@@ -136,8 +157,12 @@ router.get('/range', async (req, res) => {
       return (!from || d >= from) && (!to || d <= to);
     });
 
-    const cash = bills.filter(b => b.payment_method === 'cash').reduce((s, b) => s + Number(b.final_amount), 0);
-    const gpay = bills.filter(b => b.payment_method === 'gpay').reduce((s, b) => s + Number(b.final_amount), 0);
+    let cash = 0, gpay = 0;
+    bills.forEach(b => {
+      const amt = getBillAmounts(b);
+      cash += amt.cash;
+      gpay += amt.gpay;
+    });
     const revenue = cash + gpay;
 
     const allExpenses = await db.prepare(`SELECT * FROM expenses`).all();
@@ -184,9 +209,10 @@ router.get('/sales-report', async (req, res) => {
     let workshopSales = 0;
 
     bills.forEach(b => {
+      const bAmt = getBillAmounts(b);
       const amt = Number(b.final_amount) || 0;
-      if (b.payment_method === 'cash') cashSales += amt;
-      else gpaySales += amt;
+      cashSales += bAmt.cash;
+      gpaySales += bAmt.gpay;
 
       if (b.customer_type === 'workshop') workshopSales += amt;
       else retailSales += amt;
@@ -209,10 +235,15 @@ router.get('/sales-report', async (req, res) => {
   }
 });
 
+function normCat(str) {
+  if (!str) return 'other';
+  return str.toString().toLowerCase().replace(/[\s\-_]+/g, '');
+}
+
 // 2. Expense Report Endpoint
 router.get('/expense-report', async (req, res) => {
   try {
-    const { from, to } = req.query;
+    const { from, to, category } = req.query;
     const startDate = from || new Date().toISOString().slice(0, 10);
     const endDate = to || new Date().toISOString().slice(0, 10);
 
@@ -220,9 +251,14 @@ router.get('/expense-report', async (req, res) => {
       SELECT * FROM expenses ORDER BY date DESC, id DESC
     `).all();
 
+    const targetCat = category ? normCat(category) : 'all';
+
     const expenses = rawExpenses.filter(e => {
       const d = (e.date || '').slice(0, 10);
-      return d >= startDate && d <= endDate;
+      const matchDate = d >= startDate && d <= endDate;
+      const itemCat = normCat(e.category);
+      const matchCat = targetCat === 'all' || itemCat === targetCat || itemCat.includes(targetCat) || targetCat.includes(itemCat);
+      return matchDate && matchCat;
     });
 
     let cashExpenses = 0;
@@ -238,6 +274,11 @@ router.get('/expense-report', async (req, res) => {
       categoryTotals[cat] = (categoryTotals[cat] || 0) + amt;
     });
 
+    const expensesWithDesc = expenses.map(e => ({
+      ...e,
+      description: e.note || e.description || '-'
+    }));
+
     res.json({
       from: startDate,
       to: endDate,
@@ -246,7 +287,7 @@ router.get('/expense-report', async (req, res) => {
       gpay_expenses: gpayExpenses,
       category_totals: categoryTotals,
       expenses_count: expenses.length,
-      expenses
+      expenses: expensesWithDesc
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

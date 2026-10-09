@@ -331,7 +331,7 @@ router.post('/adjust-amount', async (req, res) => {
 // Create + pay a bill. Body: { job_id, payment_method: 'cash'|'gpay', redeem: bool }
 router.post('/', async (req, res) => {
   try {
-    const { job_id, payment_method, redeem, paid_at } = req.body;
+    const { job_id, payment_method, redeem, paid_at, cash_amount, gpay_amount } = req.body;
     const job = await getJobFull(job_id);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (job.price == null) return res.status(400).json({ error: 'No price configured for this segment/wash type' });
@@ -349,15 +349,29 @@ router.post('/', async (req, res) => {
       pointsRedeemed = REDEEM_THRESHOLD;
     }
     const finalAmount = Math.max(0, job.price - discount);
-    const paidAt = payment_method === 'gpay' && paid_at ? new Date(paid_at) : new Date();
+    const payMethod = (payment_method || 'cash').toLowerCase();
+    let cashAmt = 0;
+    let gpayAmt = 0;
+    if (payMethod === 'split') {
+      cashAmt = Number(cash_amount) || 0;
+      gpayAmt = Number(gpay_amount) || Math.max(0, finalAmount - cashAmt);
+    } else if (payMethod === 'gpay') {
+      cashAmt = 0;
+      gpayAmt = finalAmount;
+    } else {
+      cashAmt = finalAmount;
+      gpayAmt = 0;
+    }
+
+    const paidAt = payMethod === 'gpay' && paid_at ? new Date(paid_at) : new Date();
     if (Number.isNaN(paidAt.getTime())) {
       return res.status(400).json({ error: 'Invalid payment date and time' });
     }
 
     const info = await db.prepare(`
-      INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)
-    `).run(job.id, job.price, discount, finalAmount, payment_method, POINTS_PER_WASH, pointsRedeemed, paidAt.toISOString());
+      INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, cash_amount, gpay_amount, reward_points_earned, reward_points_redeemed, status, paid_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?)
+    `).run(job.id, job.price, discount, finalAmount, payMethod, cashAmt, gpayAmt, POINTS_PER_WASH, pointsRedeemed, paidAt.toISOString());
 
     if (customer) {
       const newPoints = customer.reward_points - pointsRedeemed + POINTS_PER_WASH;
@@ -638,30 +652,44 @@ router.get('/workshop-summary', async (req, res) => {
 // Single job settlement endpoint
 router.post('/settle-job', async (req, res) => {
   try {
-    const { job_id, payment_method, paid_at } = req.body;
+    const { job_id, payment_method, paid_at, cash_amount, gpay_amount } = req.body;
     if (!job_id) return res.status(400).json({ error: 'job_id is required' });
 
     const job = await getJobFull(job_id);
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
-    const payMethod = payment_method || 'cash';
+    const payMethod = (payment_method || 'cash').toLowerCase();
+    const finalPrice = job.price || 0;
+    let cashAmt = 0;
+    let gpayAmt = 0;
+    if (payMethod === 'split') {
+      cashAmt = Number(cash_amount) || 0;
+      gpayAmt = Number(gpay_amount) || Math.max(0, finalPrice - cashAmt);
+    } else if (payMethod === 'gpay') {
+      cashAmt = 0;
+      gpayAmt = finalPrice;
+    } else {
+      cashAmt = finalPrice;
+      gpayAmt = 0;
+    }
+
     const paidAt = payMethod === 'gpay' && paid_at ? new Date(paid_at) : new Date();
     if (Number.isNaN(paidAt.getTime())) {
       return res.status(400).json({ error: 'Invalid payment date and time' });
     }
     const now = paidAt.toISOString();
 
-    await db.prepare("UPDATE jobs SET payment_status = 'settled', paid_amount = ? WHERE id = ?").run(job.price, job.id);
+    await db.prepare("UPDATE jobs SET payment_status = 'settled', paid_amount = ? WHERE id = ?").run(finalPrice, job.id);
 
     const existingBill = await db.prepare('SELECT * FROM bills WHERE job_id = ?').get(job.id);
     if (existingBill) {
-      await db.prepare("UPDATE bills SET status = 'paid', final_amount = ?, payment_method = ?, paid_at = ? WHERE id = ?")
-        .run(job.price, payMethod, now, existingBill.id);
+      await db.prepare("UPDATE bills SET status = 'paid', final_amount = ?, payment_method = ?, cash_amount = ?, gpay_amount = ?, paid_at = ? WHERE id = ?")
+        .run(finalPrice, payMethod, cashAmt, gpayAmt, now, existingBill.id);
     } else {
       await db.prepare(`
-        INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-        VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
-      `).run(job.id, job.price, job.price, payMethod, now);
+        INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, cash_amount, gpay_amount, reward_points_earned, reward_points_redeemed, status, paid_at)
+        VALUES (?, ?, 0, ?, ?, ?, ?, 0, 0, 'paid', ?)
+      `).run(job.id, finalPrice, finalPrice, payMethod, cashAmt, gpayAmt, now);
     }
 
     const updatedJob = await getJobFull(job.id);

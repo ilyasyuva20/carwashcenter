@@ -295,13 +295,26 @@ router.post('/', async (req, res) => {
 
     const fullJob = await getJobFull(info.lastInsertRowid);
     const payMethod = (payment_method || 'cash').toLowerCase();
+    const finalPrice = fullJob.price || 0;
+    let cashAmt = 0;
+    let gpayAmt = 0;
+    if (payMethod === 'split') {
+      cashAmt = Number(req.body.cash_amount) || 0;
+      gpayAmt = Number(req.body.gpay_amount) || Math.max(0, finalPrice - cashAmt);
+    } else if (payMethod === 'gpay') {
+      cashAmt = 0;
+      gpayAmt = finalPrice;
+    } else {
+      cashAmt = finalPrice;
+      gpayAmt = 0;
+    }
 
     if (payStatus === 'settled') {
       const paidAtTime = jobExitTime || jobEntryTime;
       await db.prepare(`
-        INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, reward_points_earned, reward_points_redeemed, status, paid_at)
-        VALUES (?, ?, 0, ?, ?, 0, 0, 'paid', ?)
-      `).run(fullJob.id, fullJob.price, fullJob.price, payMethod, paidAtTime);
+        INSERT INTO bills (job_id, amount, discount_amount, final_amount, payment_method, cash_amount, gpay_amount, reward_points_earned, reward_points_redeemed, status, paid_at)
+        VALUES (?, ?, 0, ?, ?, ?, ?, 0, 0, 'paid', ?)
+      `).run(fullJob.id, finalPrice, finalPrice, payMethod, cashAmt, gpayAmt, paidAtTime);
     }
 
     res.json(fullJob);

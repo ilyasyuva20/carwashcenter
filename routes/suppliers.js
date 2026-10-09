@@ -182,7 +182,8 @@ router.post('/:id/purchases', async (req, res) => {
       paid_amount,
       payment_method,
       date,
-      note
+      note,
+      bill_url
     } = req.body;
 
     const totalAmt = Number(total_amount) || 0;
@@ -206,8 +207,8 @@ router.post('/:id/purchases', async (req, res) => {
 
     const purchaseStmt = await db.prepare(`
       INSERT INTO supplier_purchases (
-        supplier_id, item_details, category, total_amount, paid_amount, pending_amount, payment_method, date, note, expense_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        supplier_id, item_details, category, total_amount, paid_amount, pending_amount, payment_method, date, note, expense_id, bill_url, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       supplierId,
       item_details || '',
@@ -219,6 +220,7 @@ router.post('/:id/purchases', async (req, res) => {
       txnDate,
       note || '',
       expenseId,
+      bill_url || '',
       createdAt
     );
 

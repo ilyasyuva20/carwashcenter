@@ -23,7 +23,17 @@ const upload = multer({ storage });
 
 router.get('/', async (req, res) => {
   try {
-    const rows = await db.prepare('SELECT * FROM employees WHERE active = 1 ORDER BY name').all();
+    const { status } = req.query;
+    let sql = 'SELECT * FROM employees';
+    if (status === 'inactive') {
+      sql += ' WHERE active = 0 ORDER BY name';
+    } else if (status === 'all') {
+      sql += ' ORDER BY active DESC, name ASC';
+    } else {
+      // Default: active employees only
+      sql += ' WHERE active = 1 ORDER BY name';
+    }
+    const rows = await db.prepare(sql).all();
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -43,16 +53,17 @@ router.get('/:id', async (req, res) => {
 // Post with optional aadhaar_file upload
 router.post('/', upload.single('aadhaar_file'), async (req, res) => {
   try {
-    const { name, phone, role, salary_monthly, join_date, branch_id, aadhaar_number } = req.body;
+    const { name, phone, role, salary_monthly, join_date, branch_id, aadhaar_number, active } = req.body;
     
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Employee name is required' });
     }
 
     const aadhaar_file = req.file ? `/uploads/${req.file.filename}` : (req.body.aadhaar_file || null);
+    const activeVal = active !== undefined ? (Number(active) ? 1 : 0) : 1;
 
     const info = await db.prepare(
-      'INSERT INTO employees (name, phone, role, salary_monthly, join_date, branch_id, aadhaar_number, aadhaar_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO employees (name, phone, role, salary_monthly, join_date, branch_id, aadhaar_number, aadhaar_file, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       name.trim(),
       phone || null,
@@ -61,7 +72,8 @@ router.post('/', upload.single('aadhaar_file'), async (req, res) => {
       join_date || null,
       Number(branch_id) || 1,
       aadhaar_number || null,
-      aadhaar_file
+      aadhaar_file,
+      activeVal
     );
     
     const created = await db.prepare('SELECT * FROM employees WHERE id = ?').get(info.lastInsertRowid);
@@ -74,14 +86,15 @@ router.post('/', upload.single('aadhaar_file'), async (req, res) => {
 
 router.put('/:id', upload.single('aadhaar_file'), async (req, res) => {
   try {
-    const { name, phone, role, salary_monthly, join_date, aadhaar_number } = req.body;
+    const { name, phone, role, salary_monthly, join_date, aadhaar_number, active } = req.body;
     const existing = await db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Employee not found' });
 
     const aadhaar_file = req.file ? `/uploads/${req.file.filename}` : existing.aadhaar_file;
+    const newActive = active !== undefined ? (Number(active) ? 1 : 0) : (existing.active !== undefined ? existing.active : 1);
 
     await db.prepare(
-      'UPDATE employees SET name=?, phone=?, role=?, salary_monthly=?, join_date=?, aadhaar_number=?, aadhaar_file=? WHERE id=?'
+      'UPDATE employees SET name=?, phone=?, role=?, salary_monthly=?, join_date=?, aadhaar_number=?, aadhaar_file=?, active=? WHERE id=?'
     ).run(
       name || existing.name,
       phone !== undefined ? phone : existing.phone,
@@ -90,6 +103,7 @@ router.put('/:id', upload.single('aadhaar_file'), async (req, res) => {
       join_date || existing.join_date,
       aadhaar_number !== undefined ? aadhaar_number : existing.aadhaar_number,
       aadhaar_file,
+      newActive,
       req.params.id
     );
     
@@ -102,8 +116,14 @@ router.put('/:id', upload.single('aadhaar_file'), async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    await db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(req.params.id);
-    res.json({ ok: true });
+    const { permanent } = req.query;
+    if (permanent === 'true') {
+      await db.prepare('DELETE FROM employees WHERE id = ?').run(req.params.id);
+      res.json({ ok: true, message: 'Employee permanently deleted' });
+    } else {
+      await db.prepare('UPDATE employees SET active = 0 WHERE id = ?').run(req.params.id);
+      res.json({ ok: true, message: 'Employee marked as inactive' });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -169,10 +189,56 @@ router.post('/:id/advance', async (req, res) => {
   }
 });
 
-router.get('/:id/advances', async (req, res) => {
+// Update advance payment
+router.put('/advances/:advanceId', async (req, res) => {
   try {
-    const rows = await db.prepare('SELECT * FROM advances WHERE employee_id = ? ORDER BY date DESC').all(req.params.id);
-    res.json(rows);
+    const { amount, date, payment_method, note } = req.body;
+    const advance = await db.prepare('SELECT * FROM advances WHERE id = ?').get(req.params.advanceId);
+    if (!advance) return res.status(404).json({ error: 'Advance record not found' });
+
+    let fullTimestamp;
+    if (date && date.includes('T')) {
+      const dt = new Date(date);
+      if (!isNaN(dt.getTime())) {
+        const y = dt.getFullYear();
+        const m = String(dt.getMonth() + 1).padStart(2, '0');
+        const d = String(dt.getDate()).padStart(2, '0');
+        const timeStr = dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+        fullTimestamp = `${y}-${m}-${d} ${timeStr}`;
+      } else {
+        fullTimestamp = date;
+      }
+    } else if (date) {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      fullTimestamp = `${date} ${timeStr}`;
+    } else {
+      fullTimestamp = advance.date;
+    }
+
+    const newAmount = amount !== undefined ? Number(amount) : advance.amount;
+    const newMethod = payment_method || advance.payment_method || 'cash';
+    const newNote = note !== undefined ? note : advance.note;
+
+    await db.prepare(
+      'UPDATE advances SET date = ?, amount = ?, payment_method = ?, note = ? WHERE id = ?'
+    ).run(fullTimestamp, newAmount, newMethod, newNote, advance.id);
+
+    const updated = await db.prepare('SELECT * FROM advances WHERE id = ?').get(advance.id);
+    res.json(updated);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Delete advance payment
+router.delete('/advances/:advanceId', async (req, res) => {
+  try {
+    const advance = await db.prepare('SELECT * FROM advances WHERE id = ?').get(req.params.advanceId);
+    if (!advance) return res.status(404).json({ error: 'Advance record not found' });
+
+    await db.prepare('DELETE FROM advances WHERE id = ?').run(advance.id);
+    res.json({ ok: true, message: 'Advance deleted successfully', id: advance.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
