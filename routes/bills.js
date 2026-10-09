@@ -403,21 +403,21 @@ router.get('/', async (req, res) => {
     // Fetch full job objects in single batch query for maximum speed
     let allJobs = (await getJobsFullBatch(allRawJobs)).filter(Boolean);
 
-    // Helper to extract YYYY-MM-DD in local time matching frontend Completed Date display
     function getJobDateStr(j) {
       const val = j.exit_time || j.completed_at || j.entry_time;
       if (!val) return '';
       const dt = new Date(val);
       if (isNaN(dt.getTime())) return String(val).slice(0, 10);
-      const y = dt.getFullYear();
-      const m = String(dt.getMonth() + 1).padStart(2, '0');
-      const d = String(dt.getDate()).padStart(2, '0');
+      const istDt = new Date(dt.getTime() + (5.5 * 60 * 60 * 1000));
+      const y = istDt.getUTCFullYear();
+      const m = String(istDt.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(istDt.getUTCDate()).padStart(2, '0');
       return `${y}-${m}-${d}`;
     }
 
-    // Get today's local date string YYYY-MM-DD
-    const now = new Date();
-    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    // Get today's local date string YYYY-MM-DD in IST
+    const nowIst = new Date(Date.now() + (5.5 * 60 * 60 * 1000));
+    const todayStr = `${nowIst.getUTCFullYear()}-${String(nowIst.getUTCMonth() + 1).padStart(2, '0')}-${String(nowIst.getUTCDate()).padStart(2, '0')}`;
     const refStartDate = startDate || date || todayStr;
 
     // Count unpaid jobs completed before refStartDate (other pending)
@@ -571,13 +571,24 @@ router.get('/workshop-summary', async (req, res) => {
     let rawJobs = await db.prepare("SELECT * FROM jobs WHERE customer_type = 'workshop' ORDER BY id DESC").all();
     const workshopJobsAllCount = rawJobs.length;
 
+    function getIstDateStr(val) {
+      if (!val) return '';
+      const dt = new Date(val);
+      if (isNaN(dt.getTime())) return String(val).slice(0, 10);
+      const istDt = new Date(dt.getTime() + (5.5 * 60 * 60 * 1000));
+      const y = istDt.getUTCFullYear();
+      const m = String(istDt.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(istDt.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
     if (startDate && endDate) {
       rawJobs = rawJobs.filter(j => {
-        const d = (j.entry_time || '').slice(0, 10);
+        const d = getIstDateStr(j.entry_time);
         return d >= startDate && d <= endDate;
       });
     } else if (date) {
-      rawJobs = rawJobs.filter(j => (j.entry_time || '').startsWith(date));
+      rawJobs = rawJobs.filter(j => getIstDateStr(j.entry_time) === date);
     }
 
     if (payment_status && payment_status !== 'all') {

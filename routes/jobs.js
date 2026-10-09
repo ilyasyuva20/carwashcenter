@@ -347,7 +347,16 @@ router.get('/', async (req, res) => {
     if (status) jobs = jobs.filter(j => j.status === status);
     if (payment_status) jobs = jobs.filter(j => j.payment_status === payment_status);
     if (customer_type) jobs = jobs.filter(j => j.customer_type === customer_type);
-    if (date) jobs = jobs.filter(j => j.entry_time && j.entry_time.startsWith(date));
+    if (date) {
+      jobs = jobs.filter(j => {
+        if (!j.entry_time) return false;
+        const dt = new Date(j.entry_time);
+        if (isNaN(dt.getTime())) return j.entry_time.startsWith(date);
+        const istDt = new Date(dt.getTime() + (5.5 * 60 * 60 * 1000));
+        const dStr = `${istDt.getUTCFullYear()}-${String(istDt.getUTCMonth() + 1).padStart(2, '0')}-${String(istDt.getUTCDate()).padStart(2, '0')}`;
+        return dStr === date;
+      });
+    }
     
     const fullJobs = await getJobsFullBatch(jobs);
     const payloadBytes = Buffer.byteLength(JSON.stringify(fullJobs));

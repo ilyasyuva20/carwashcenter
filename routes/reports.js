@@ -2,6 +2,20 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
+function getISTDateStr(isoString) {
+  if (!isoString) return '';
+  if (isoString.length === 10 && !isoString.includes('T')) return isoString;
+  const dateObj = new Date(isoString);
+  if (isNaN(dateObj)) return isoString.slice(0, 10);
+  const istTime = dateObj.getTime() + (5.5 * 60 * 60 * 1000);
+  return new Date(istTime).toISOString().slice(0, 10);
+}
+
+function getTodayIST() {
+  const istTime = Date.now() + (5.5 * 60 * 60 * 1000);
+  return new Date(istTime).toISOString().slice(0, 10);
+}
+
 function getBillAmounts(b) {
   const finalAmt = Number(b.final_amount) || 0;
   if (b.payment_method === 'split') {
@@ -16,7 +30,8 @@ function getBillAmounts(b) {
 }
 
 async function summaryFor(date) {
-  const bills = await db.prepare(`SELECT * FROM bills WHERE status='paid' AND paid_at LIKE ?`).all(`${date}%`);
+  const allBills = await db.prepare(`SELECT * FROM bills WHERE status='paid'`).all();
+  const bills = allBills.filter(b => getISTDateStr(b.paid_at || b.created_at) === date);
   let cash = 0, gpay = 0;
   bills.forEach(b => {
     const amt = getBillAmounts(b);
@@ -25,8 +40,8 @@ async function summaryFor(date) {
   });
   const revenue = cash + gpay;
   
-  const jobsTodayRow = await db.prepare(`SELECT COUNT(*) as c FROM jobs WHERE entry_time LIKE ?`).get(`${date}%`);
-  const jobsToday = jobsTodayRow ? Number(jobsTodayRow.c) : 0;
+  const allJobs = await db.prepare(`SELECT entry_time FROM jobs`).all();
+  const jobsToday = allJobs.filter(j => getISTDateStr(j.entry_time) === date).length;
 
   const expensesRow = await db.prepare(`SELECT COALESCE(SUM(amount),0) as s FROM expenses WHERE date = ?`).get(date);
   const expenses = expensesRow ? Number(expensesRow.s) : 0;
@@ -40,7 +55,8 @@ async function summaryFor(date) {
 async function ledgerFor(date) {
   const op = (await db.prepare('SELECT opening_cash, opening_gpay FROM daily_opening_balances WHERE date = ?').get(date)) || { opening_cash: 0, opening_gpay: 0 };
   
-  const bills = await db.prepare(`SELECT * FROM bills WHERE status='paid' AND paid_at LIKE ?`).all(`${date}%`);
+  const allBills = await db.prepare(`SELECT * FROM bills WHERE status='paid'`).all();
+  const bills = allBills.filter(b => getISTDateStr(b.paid_at || b.created_at) === date);
   let cashSales = 0, gpaySales = 0;
   bills.forEach(b => {
     const amt = getBillAmounts(b);
@@ -87,7 +103,7 @@ async function ledgerFor(date) {
 
 router.get('/today', async (req, res) => {
   try {
-    const date = new Date().toISOString().slice(0, 10);
+    const date = getTodayIST();
     const summary = await summaryFor(date);
     const ledger = await ledgerFor(date);
     res.json({ ...summary, ledger });
@@ -99,7 +115,7 @@ router.get('/today', async (req, res) => {
 router.get('/ledger', async (req, res) => {
   try {
     const { date } = req.query;
-    const targetDate = date || new Date().toISOString().slice(0, 10);
+    const targetDate = date || getTodayIST();
     const ledger = await ledgerFor(targetDate);
     res.json(ledger);
   } catch (err) {
@@ -110,7 +126,7 @@ router.get('/ledger', async (req, res) => {
 router.post('/opening-balance', async (req, res) => {
   try {
     const { date, opening_cash, opening_gpay } = req.body;
-    const targetDate = date || new Date().toISOString().slice(0, 10);
+    const targetDate = date || getTodayIST();
     const opCash = Number(opening_cash) || 0;
     const opGpay = Number(opening_gpay) || 0;
 
@@ -141,7 +157,7 @@ router.post('/opening-balance', async (req, res) => {
 router.get('/daily', async (req, res) => {
   try {
     const { date } = req.query;
-    const summary = await summaryFor(date || new Date().toISOString().slice(0, 10));
+    const summary = await summaryFor(date || getTodayIST());
     res.json(summary);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -153,7 +169,7 @@ router.get('/range', async (req, res) => {
     const { from, to } = req.query;
     const allBills = await db.prepare(`SELECT * FROM bills WHERE status='paid'`).all();
     const bills = allBills.filter(b => {
-      const d = (b.paid_at || b.created_at || '').slice(0, 10);
+      const d = getISTDateStr(b.paid_at || b.created_at);
       return (!from || d >= from) && (!to || d <= to);
     });
 
@@ -186,8 +202,8 @@ router.get('/range', async (req, res) => {
 router.get('/sales-report', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const rawBills = await db.prepare(`
       SELECT b.*, j.customer_type, j.workshop_id, j.vehicle_id, v.reg_number, v.brand, v.model
@@ -199,7 +215,7 @@ router.get('/sales-report', async (req, res) => {
     `).all();
 
     const bills = rawBills.filter(b => {
-      const d = (b.paid_at || b.created_at || '').slice(0, 10);
+      const d = getISTDateStr(b.paid_at || b.created_at);
       return d >= startDate && d <= endDate;
     });
 
@@ -244,8 +260,8 @@ function normCat(str) {
 router.get('/expense-report', async (req, res) => {
   try {
     const { from, to, category } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const rawExpenses = await db.prepare(`
       SELECT * FROM expenses ORDER BY date DESC, id DESC
@@ -254,7 +270,7 @@ router.get('/expense-report', async (req, res) => {
     const targetCat = category ? normCat(category) : 'all';
 
     const expenses = rawExpenses.filter(e => {
-      const d = (e.date || '').slice(0, 10);
+      const d = getISTDateStr(e.date);
       const matchDate = d >= startDate && d <= endDate;
       const itemCat = normCat(e.category);
       const matchCat = targetCat === 'all' || itemCat === targetCat || itemCat.includes(targetCat) || targetCat.includes(itemCat);
@@ -298,8 +314,8 @@ router.get('/expense-report', async (req, res) => {
 router.get('/car-report', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const allJobs = await db.prepare(`
       SELECT j.*, v.reg_number, v.segment, v.brand, v.model, wt.name as wash_type_name
@@ -311,7 +327,7 @@ router.get('/car-report', async (req, res) => {
     `).all();
 
     const rawJobs = allJobs.filter(j => {
-      const d = (j.entry_time || '').slice(0, 10);
+      const d = getISTDateStr(j.entry_time);
       return d >= startDate && d <= endDate;
     });
 
@@ -349,8 +365,8 @@ router.get('/car-report', async (req, res) => {
 router.get('/bike-report', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const allJobs = await db.prepare(`
       SELECT j.*, v.reg_number, v.segment, v.brand, v.model, wt.name as wash_type_name
@@ -362,7 +378,7 @@ router.get('/bike-report', async (req, res) => {
     `).all();
 
     const rawJobs = allJobs.filter(j => {
-      const d = (j.entry_time || '').slice(0, 10);
+      const d = getISTDateStr(j.entry_time);
       return d >= startDate && d <= endDate;
     });
 
@@ -411,8 +427,8 @@ router.get('/bike-report', async (req, res) => {
 router.get('/car-workshop-report', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const workshops = await db.prepare("SELECT * FROM workshops WHERE type = 'Car Workshop' ORDER BY name ASC").all();
     const workshopSummary = [];
@@ -428,7 +444,7 @@ router.get('/car-workshop-report', async (req, res) => {
       `).all(w.id);
 
       const jobs = allJobs.filter(j => {
-        const d = (j.entry_time || '').slice(0, 10);
+        const d = getISTDateStr(j.entry_time);
         return d >= startDate && d <= endDate;
       });
 
@@ -469,8 +485,8 @@ router.get('/car-workshop-report', async (req, res) => {
 router.get('/bike-workshop-report', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const workshops = await db.prepare("SELECT * FROM workshops WHERE type = 'Bike Workshop' ORDER BY name ASC").all();
     const workshopSummary = [];
@@ -486,7 +502,7 @@ router.get('/bike-workshop-report', async (req, res) => {
       `).all(w.id);
 
       const jobs = allJobs.filter(j => {
-        const d = (j.entry_time || '').slice(0, 10);
+        const d = getISTDateStr(j.entry_time);
         return d >= startDate && d <= endDate;
       });
 
@@ -527,8 +543,8 @@ router.get('/bike-workshop-report', async (req, res) => {
 router.get('/attendance-report', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const employees = await db.prepare("SELECT id, name, role, phone FROM employees WHERE active = 1 ORDER BY name ASC").all();
     const allRecords = await db.prepare(`
@@ -539,7 +555,7 @@ router.get('/attendance-report', async (req, res) => {
     `).all();
 
     const records = allRecords.filter(r => {
-      const d = (r.date || '').slice(0, 10);
+      const d = getISTDateStr(r.date);
       return d >= startDate && d <= endDate;
     });
 
@@ -658,8 +674,8 @@ router.get('/customers-report', async (req, res) => {
 router.get('/salary-advance-report', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const startDate = from || new Date().toISOString().slice(0, 10);
-    const endDate = to || new Date().toISOString().slice(0, 10);
+    const startDate = from || getTodayIST();
+    const endDate = to || getTodayIST();
 
     const allAdvances = await db.prepare(`
       SELECT a.*, e.name as employee_name, e.role
@@ -669,7 +685,7 @@ router.get('/salary-advance-report', async (req, res) => {
     `).all();
 
     const advances = allAdvances.filter(a => {
-      const d = (a.date || '').slice(0, 10);
+      const d = getISTDateStr(a.date);
       return d >= startDate && d <= endDate;
     });
 
