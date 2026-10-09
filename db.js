@@ -115,15 +115,26 @@ const db = {
       },
       async all(...args) {
         const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);
+        const t0 = Date.now();
         if (pool) {
           try {
             const res = await pool.query(pgSql, cleanArgs);
+            // #region agent log
+            fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'C',location:'db.js:all',message:'db.all postgres',data:{ms:Date.now()-t0,rowCount:res.rows.length,sql:sql.slice(0,120),usedPostgres:true},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
             return res.rows;
           } catch (err) {
             console.warn(`⚡ [DB] Postgres query error (${err.message}). Falling back to local SQLite...`);
+            // #region agent log
+            fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'C',location:'db.js:all-fallback',message:'postgres failed fallback sqlite',data:{ms:Date.now()-t0,err:String(err.message||err).slice(0,180),sql:sql.slice(0,120)},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
           }
         }
-        return getSqlite().prepare(sql).all(...cleanArgs);
+        const rows = getSqlite().prepare(sql).all(...cleanArgs);
+        // #region agent log
+        fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'C',location:'db.js:all-sqlite',message:'db.all sqlite',data:{ms:Date.now()-t0,rowCount:rows.length,sql:sql.slice(0,120),usedPostgres:false},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        return rows;
       },
       async run(...args) {
         const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);

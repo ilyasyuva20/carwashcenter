@@ -388,10 +388,11 @@ router.post('/', async (req, res) => {
 // Get Normal Retail Customer Bills & Summary, including jobs paid before completion.
 router.get('/', async (req, res) => {
   try {
+    const t0 = Date.now();
     const { date, startDate, endDate, segment, payment_status, q } = req.query;
 
     let allRawJobs = await db.prepare(`
-      SELECT j.id, j.entry_time, j.exit_time, j.payment_status, b.status AS bill_status
+      SELECT j.*, b.status AS bill_status
       FROM jobs j
       LEFT JOIN bills b ON b.job_id = j.id
       WHERE (j.customer_type != 'workshop' OR j.customer_type IS NULL)
@@ -519,7 +520,7 @@ router.get('/', async (req, res) => {
       }
     });
 
-    res.json({
+    const payload = {
       summary: {
         total_cars: totalCars,
         total_bikes: totalBikes,
@@ -536,7 +537,11 @@ router.get('/', async (req, res) => {
         other_pending_count: otherPendingCount
       },
       jobs
-    });
+    };
+    // #region agent log
+    fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'A',location:'bills.js:GET /',message:'GET /bills complete',data:{ms:Date.now()-t0,rawCount:allRawJobs.length,hydratedCount:allJobs.length,returnedJobs:jobs.length,payloadBytes:Buffer.byteLength(JSON.stringify(payload)),startDate:startDate||null,endDate:endDate||null,payment_status:payment_status||null,segment:segment||null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -544,6 +549,7 @@ router.get('/', async (req, res) => {
 
 router.get('/workshop-summary', async (req, res) => {
   try {
+    const t0 = Date.now();
     const { date, startDate, endDate, type, workshop_id, payment_status, q } = req.query;
 
     let workshops = await db.prepare('SELECT * FROM workshops ORDER BY name ASC').all();
@@ -562,7 +568,8 @@ router.get('/workshop-summary', async (req, res) => {
       );
     }
 
-    let rawJobs = await db.prepare("SELECT id, entry_time, workshop_id, payment_status FROM jobs WHERE customer_type = 'workshop' ORDER BY id DESC").all();
+    let rawJobs = await db.prepare("SELECT * FROM jobs WHERE customer_type = 'workshop' ORDER BY id DESC").all();
+    const workshopJobsAllCount = rawJobs.length;
 
     if (startDate && endDate) {
       rawJobs = rawJobs.filter(j => {
@@ -632,7 +639,7 @@ router.get('/workshop-summary', async (req, res) => {
       }
     });
 
-    res.json({
+    const payload = {
       summary: {
         total_cars: overallCars,
         total_bikes: overallBikes,
@@ -643,7 +650,11 @@ router.get('/workshop-summary', async (req, res) => {
       },
       workshops: Object.values(workshopMap),
       unassigned_jobs: unassignedJobs
-    });
+    };
+    // #region agent log
+    fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'A',location:'bills.js:GET /workshop-summary',message:'workshop-summary complete',data:{ms:Date.now()-t0,rawJobCount:rawJobs.length,fullJobCount:fullJobs.length,workshopJobsAllCount,payloadBytes:Buffer.byteLength(JSON.stringify(payload)),startDate:startDate||null,endDate:endDate||null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

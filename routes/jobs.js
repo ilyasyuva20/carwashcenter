@@ -24,6 +24,14 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+const JOB_LIST_COLS = 'id, branch_id, vehicle_id, wash_type_id, entry_time, exit_time, eta_minutes, status, has_chain_lube, chain_lube_price, customer_type, workshop_id, payment_status, customer_name, offer_price, paid_amount';
+
+function agentLog(hypothesisId, location, message, data) {
+  const payload = { sessionId: 'fee15e', runId: 'post-fix', hypothesisId, location, message, data, timestamp: Date.now() };
+  try { fs.appendFileSync('/home/ilyas/ILYAS/Node/Car Wash/carwash-app/.cursor/debug-fee15e.log', JSON.stringify(payload) + '\n'); } catch (e) {}
+  fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fee15e' }, body: JSON.stringify(payload) }).catch(() => {});
+}
+
 router.post('/upload-before-photo', upload.single('photo'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
@@ -36,7 +44,8 @@ router.post('/upload-before-photo', upload.single('photo'), (req, res) => {
   }
 });
 
-async function getJobsFullBatch(jobsOrIds) {
+async function getJobsFullBatch(jobsOrIds, options = {}) {
+  const includePhotos = options.includePhotos === true;
   if (!jobsOrIds || !Array.isArray(jobsOrIds) || jobsOrIds.length === 0) {
     return [];
   }
@@ -49,7 +58,8 @@ async function getJobsFullBatch(jobsOrIds) {
     const ids = jobsOrIds.map(Number).filter(n => Number.isInteger(n));
     if (ids.length === 0) return [];
     const placeholders = ids.map(() => '?').join(',');
-    rawJobs = await db.prepare(`SELECT * FROM jobs WHERE id IN (${placeholders}) ORDER BY id DESC`).all(...ids);
+    const cols = includePhotos ? '*' : JOB_LIST_COLS;
+    rawJobs = await db.prepare(`SELECT ${cols} FROM jobs WHERE id IN (${placeholders}) ORDER BY id DESC`).all(...ids);
   }
 
   if (rawJobs.length === 0) return [];
@@ -110,6 +120,10 @@ async function getJobsFullBatch(jobsOrIds) {
     }
   });
 
+  // #region agent log
+  const photoBytes = rawJobs.reduce((s, j) => s + (j.before_photos ? String(j.before_photos).length : 0), 0);
+  agentLog('B', 'jobs.js:getJobsFullBatch', 'hydrate jobs batch', { rawCount: rawJobs.length, photoBytes, includePhotos, vehicleIds: vehicleIds.length, workshopIds: workshopIds.length });
+  // #endregion
   return rawJobs.map(job => {
     const vehicle = vehicleMap.get(job.vehicle_id) ? { ...vehicleMap.get(job.vehicle_id) } : null;
     if (vehicle && vehicle.customer_id) {
@@ -119,7 +133,7 @@ async function getJobsFullBatch(jobsOrIds) {
     }
 
     let beforePhotosArr = [];
-    if (job.before_photos) {
+    if (includePhotos && job.before_photos) {
       try {
         const rawArr = typeof job.before_photos === 'string' ? JSON.parse(job.before_photos) : job.before_photos;
         if (Array.isArray(rawArr)) {
@@ -128,7 +142,7 @@ async function getJobsFullBatch(jobsOrIds) {
               return `https://carwashapp-xwz9.onrender.com${url}`;
             }
             return url;
-          });
+          }).filter(url => typeof url === 'string' && !url.startsWith('data:'));
         }
       } catch (e) {
         beforePhotosArr = [];
@@ -172,8 +186,9 @@ async function getJobsFullBatch(jobsOrIds) {
     const bill = billMap.get(job.id) || null;
     const paidAmount = job.payment_status === 'settled' ? totalPrice : (Number(job.paid_amount) || 0);
 
+    const { before_photos: _omitPhotos, ...jobRest } = job;
     return {
-      ...job,
+      ...jobRest,
       customer_name: job.customer_name || '',
       before_photos: beforePhotosArr,
       vehicle,
@@ -189,7 +204,7 @@ async function getJobsFullBatch(jobsOrIds) {
 }
 
 async function getJobFull(id) {
-  const jobs = await getJobsFullBatch([id]);
+  const jobs = await getJobsFullBatch([id], { includePhotos: true });
   return jobs[0] || null;
 }
 
@@ -325,14 +340,20 @@ router.post('/', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
+    const t0 = Date.now();
     const { status, date, payment_status, customer_type } = req.query;
     let jobs = await db.prepare('SELECT * FROM jobs ORDER BY id DESC').all();
+    const allCount = jobs.length;
     if (status) jobs = jobs.filter(j => j.status === status);
     if (payment_status) jobs = jobs.filter(j => j.payment_status === payment_status);
     if (customer_type) jobs = jobs.filter(j => j.customer_type === customer_type);
     if (date) jobs = jobs.filter(j => j.entry_time && j.entry_time.startsWith(date));
     
     const fullJobs = await getJobsFullBatch(jobs);
+    const payloadBytes = Buffer.byteLength(JSON.stringify(fullJobs));
+    // #region agent log
+    fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'A',location:'jobs.js:GET /',message:'GET /jobs complete',data:{ms:Date.now()-t0,allCount,filteredCount:jobs.length,payloadBytes,status:status||null,date:date||null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     res.json(fullJobs);
   } catch (err) {
     res.status(500).json({ error: err.message });
