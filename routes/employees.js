@@ -135,10 +135,28 @@ router.get('/:id/download-aadhaar', async (req, res) => {
 router.post('/:id/advance', async (req, res) => {
   try {
     const { amount, date, payment_method, note } = req.body;
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-    const datePart = date || now.toISOString().slice(0, 10);
-    const fullTimestamp = `${datePart} ${timeStr}`;
+    let fullTimestamp;
+    if (date && date.includes('T')) {
+      const dt = new Date(date);
+      if (!isNaN(dt.getTime())) {
+        const y = dt.getFullYear();
+        const m = String(dt.getMonth() + 1).padStart(2, '0');
+        const d = String(dt.getDate()).padStart(2, '0');
+        const timeStr = dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+        fullTimestamp = `${y}-${m}-${d} ${timeStr}`;
+      } else {
+        fullTimestamp = date;
+      }
+    } else if (date) {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      fullTimestamp = `${date} ${timeStr}`;
+    } else {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+      const datePart = now.toISOString().slice(0, 10);
+      fullTimestamp = `${datePart} ${timeStr}`;
+    }
 
     const info = await db.prepare(
       'INSERT INTO advances (employee_id, date, amount, payment_method, note) VALUES (?, ?, ?, ?, ?)'
