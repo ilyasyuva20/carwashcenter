@@ -44,6 +44,26 @@ router.post('/upload-before-photo', upload.single('photo'), (req, res) => {
   }
 });
 
+let refDataCache = null;
+let refDataCacheTime = 0;
+const REF_CACHE_TTL = 60000; // 60 seconds
+
+async function getRefData() {
+  const now = Date.now();
+  if (refDataCache && (now - refDataCacheTime) < REF_CACHE_TTL) {
+    return refDataCache;
+  }
+  const [washTypesList, workshopsList, pricingList, workshopPricingList] = await Promise.all([
+    db.prepare('SELECT * FROM wash_types').all(),
+    db.prepare('SELECT * FROM workshops').all(),
+    db.prepare('SELECT * FROM pricing').all(),
+    db.prepare('SELECT * FROM workshop_pricing').all()
+  ]);
+  refDataCache = { washTypesList, workshopsList, pricingList, workshopPricingList };
+  refDataCacheTime = now;
+  return refDataCache;
+}
+
 async function getJobsFullBatch(jobsOrIds, options = {}) {
   const includePhotos = options.includePhotos === true;
   if (!jobsOrIds || !Array.isArray(jobsOrIds) || jobsOrIds.length === 0) {
@@ -72,25 +92,9 @@ async function getJobsFullBatch(jobsOrIds, options = {}) {
     ? db.prepare(`SELECT * FROM vehicles WHERE id IN (${vehicleIds.map(() => '?').join(',')})`).all(...vehicleIds)
     : Promise.resolve([]);
 
-let refDataCache = null;
-let refDataCacheTime = 0;
-const REF_CACHE_TTL = 60000; // 60 seconds
-
-async function getRefData() {
-  const now = Date.now();
-  if (refDataCache && (now - refDataCacheTime) < REF_CACHE_TTL) {
-    return refDataCache;
-  }
-  const [washTypesList, workshopsList, pricingList, workshopPricingList] = await Promise.all([
-    db.prepare('SELECT * FROM wash_types').all(),
-    db.prepare('SELECT * FROM workshops').all(),
-    db.prepare('SELECT * FROM pricing').all(),
-    db.prepare('SELECT * FROM workshop_pricing').all()
-  ]);
-  refDataCache = { washTypesList, workshopsList, pricingList, workshopPricingList };
-  refDataCacheTime = now;
-  return refDataCache;
-}
+  const billsPromise = jobIds.length > 0
+    ? db.prepare(`SELECT * FROM bills WHERE job_id IN (${jobIds.map(() => '?').join(',')})`).all(...jobIds)
+    : Promise.resolve([]);
 
   const [
     vehiclesList,

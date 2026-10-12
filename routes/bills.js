@@ -548,6 +548,171 @@ router.get('/', async (req, res) => {
   }
 });
 
+// GET /api/bills/daily - Combined Single-Day Bills (Retail Customer + Workshop Partner)
+router.get('/daily', async (req, res) => {
+  try {
+    const { date, customer_type, vehicle_type, payment_status, q } = req.query;
+
+    const nowIst = new Date(Date.now() + (5.5 * 60 * 60 * 1000));
+    const todayStr = `${nowIst.getUTCFullYear()}-${String(nowIst.getUTCMonth() + 1).padStart(2, '0')}-${String(nowIst.getUTCDate()).padStart(2, '0')}`;
+    const targetDate = date || todayStr;
+
+    function getJobDateStr(j) {
+      const val = j.exit_time || j.entry_time;
+      if (!val) return '';
+      const dt = new Date(val);
+      if (isNaN(dt.getTime())) return String(val).slice(0, 10);
+      const istDt = new Date(dt.getTime() + (5.5 * 60 * 60 * 1000));
+      const y = istDt.getUTCFullYear();
+      const m = String(istDt.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(istDt.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    const targetDt = new Date(targetDate + 'T12:00:00Z');
+    const prevDt = new Date(targetDt.getTime() - 24 * 60 * 60 * 1000);
+    const nextDt = new Date(targetDt.getTime() + 24 * 60 * 60 * 1000);
+    const prevDate = prevDt.toISOString().slice(0, 10);
+    const nextDate = nextDt.toISOString().slice(0, 10);
+
+    let rawJobs = await db.prepare(`
+      SELECT j.*, b.status AS bill_status, b.payment_method AS bill_payment_method,
+             b.cash_amount AS bill_cash_amount, b.gpay_amount AS bill_gpay_amount,
+             b.final_amount AS bill_final_amount
+      FROM jobs j
+      LEFT JOIN bills b ON b.job_id = j.id
+      WHERE (
+        j.entry_time LIKE ? OR j.entry_time LIKE ? OR j.entry_time LIKE ? OR
+        j.exit_time LIKE ? OR j.exit_time LIKE ? OR j.exit_time LIKE ? OR
+        b.paid_at LIKE ? OR b.paid_at LIKE ? OR b.paid_at LIKE ?
+      )
+        AND (j.status = 'completed' OR j.payment_status = 'settled' OR b.status = 'paid')
+      ORDER BY j.id DESC
+      LIMIT 400
+    `).all(
+      `${targetDate}%`, `${prevDate}%`, `${nextDate}%`,
+      `${targetDate}%`, `${prevDate}%`, `${nextDate}%`,
+      `${targetDate}%`, `${prevDate}%`, `${nextDate}%`
+    );
+
+    rawJobs = rawJobs.filter(j => getJobDateStr(j) === targetDate);
+
+    const fullJobs = (await getJobsFullBatch(rawJobs)).filter(Boolean);
+
+    let totalCars = 0;
+    let totalBikes = 0;
+    let totalRetailJobs = 0;
+    let totalWorkshopJobs = 0;
+    let totalRevenue = 0;
+    let totalPaid = 0;
+    let totalCash = 0;
+    let totalGpay = 0;
+    let totalPending = 0;
+    let retailPaid = 0;
+    let retailPending = 0;
+    let workshopPaid = 0;
+    let workshopPending = 0;
+
+    fullJobs.forEach(job => {
+      const isCar = job.vehicle ? (!['bike', 'scooter'].includes((job.vehicle.segment || '').toLowerCase())) : true;
+      if (isCar) totalCars++;
+      else totalBikes++;
+
+      const isWorkshop = job.customer_type === 'workshop';
+      if (isWorkshop) totalWorkshopJobs++;
+      else totalRetailJobs++;
+
+      const jobAmount = Number(job.price) || 0;
+      totalRevenue += jobAmount;
+
+      const isPaid = job.payment_status === 'settled' || (job.bill && job.bill.status === 'paid');
+      const paidAmt = isPaid ? jobAmount : (Number(job.paid_amount) || 0);
+      const pendingAmt = Math.max(0, jobAmount - paidAmt);
+
+      totalPaid += paidAmt;
+      totalPending += pendingAmt;
+
+      if (isWorkshop) {
+        workshopPaid += paidAmt;
+        workshopPending += pendingAmt;
+      } else {
+        retailPaid += paidAmt;
+        retailPending += pendingAmt;
+      }
+
+      if (isPaid) {
+        const payMethod = (job.bill?.payment_method || job.payment_method || 'cash').toLowerCase();
+        if (payMethod === 'split') {
+          const cash = Number(job.bill?.cash_amount ?? job.cash_amount) || 0;
+          const gpay = Number(job.bill?.gpay_amount ?? job.gpay_amount) || Math.max(0, jobAmount - cash);
+          totalCash += cash;
+          totalGpay += gpay;
+        } else if (payMethod === 'gpay') {
+          totalGpay += jobAmount;
+        } else {
+          totalCash += jobAmount;
+        }
+      }
+    });
+
+    let filteredJobs = fullJobs;
+
+    if (customer_type === 'retail') {
+      filteredJobs = filteredJobs.filter(j => j.customer_type !== 'workshop');
+    } else if (customer_type === 'workshop') {
+      filteredJobs = filteredJobs.filter(j => j.customer_type === 'workshop');
+    }
+
+    if (vehicle_type === 'cars') {
+      filteredJobs = filteredJobs.filter(j => j.vehicle && !['bike', 'scooter'].includes((j.vehicle.segment || '').toLowerCase()));
+    } else if (vehicle_type === 'bikes') {
+      filteredJobs = filteredJobs.filter(j => j.vehicle && ['bike', 'scooter'].includes((j.vehicle.segment || '').toLowerCase()));
+    }
+
+    if (payment_status === 'paid') {
+      filteredJobs = filteredJobs.filter(j => j.payment_status === 'settled' || (j.bill && j.bill.status === 'paid'));
+    } else if (payment_status === 'unpaid' || payment_status === 'pending') {
+      filteredJobs = filteredJobs.filter(j => j.payment_status !== 'settled' && (!j.bill || j.bill.status !== 'paid'));
+    }
+
+    if (q && q.trim()) {
+      const term = q.trim().toLowerCase();
+      filteredJobs = filteredJobs.filter(j =>
+        (j.vehicle?.reg_number || '').toLowerCase().includes(term) ||
+        (j.vehicle?.brand || '').toLowerCase().includes(term) ||
+        (j.vehicle?.model || '').toLowerCase().includes(term) ||
+        (j.customer_name || '').toLowerCase().includes(term) ||
+        (j.workshop?.name || '').toLowerCase().includes(term) ||
+        (j.phone || j.vehicle?.phone || '').includes(term)
+      );
+    }
+
+    res.json({
+      date: targetDate,
+      summary: {
+        total_vehicles: fullJobs.length,
+        total_cars: totalCars,
+        total_bikes: totalBikes,
+        total_retail: totalRetailJobs,
+        total_workshop: totalWorkshopJobs,
+        total_revenue: totalRevenue,
+        total_paid: totalPaid,
+        total_cash: totalCash,
+        total_gpay: totalGpay,
+        total_pending: totalPending,
+        retail_paid: retailPaid,
+        retail_pending: retailPending,
+        workshop_paid: workshopPaid,
+        workshop_pending: workshopPending
+      },
+      jobs: filteredJobs
+    });
+  } catch (err) {
+    console.error('Error in GET /bills/daily:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/workshop-summary', async (req, res) => {
   try {
     const t0 = Date.now();
