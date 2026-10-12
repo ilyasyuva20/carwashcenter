@@ -79,21 +79,35 @@ if (usePostgres) {
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 5000
+    connectionTimeoutMillis: 3000
   });
 
-  pool.query(`
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_name TEXT;
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS before_photos TEXT;
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offer_price REAL;
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS paid_amount REAL DEFAULT 0;
-    ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT;
-    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS year TEXT;
-    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS owner_name TEXT;
-    ALTER TABLE attendance ADD COLUMN IF NOT EXISTS shift_start TEXT DEFAULT '08:00';
-    ALTER TABLE employees ADD COLUMN IF NOT EXISTS default_shift TEXT DEFAULT '08:00';
-    ALTER TABLE supplier_purchases ADD COLUMN IF NOT EXISTS bill_url TEXT;
-  `).catch(err => console.warn("⚡ [DB] Postgres pool query warning:", err.message));
+  pool.on('error', (err) => {
+    console.warn("⚡ [DB] Postgres pool connection error. Switching to local SQLite:", err.message);
+    pool = null;
+  });
+
+  (async () => {
+    try {
+      await pool.query(`
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS customer_name TEXT;
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS before_photos TEXT;
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offer_price REAL;
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS paid_amount REAL DEFAULT 0;
+        ALTER TABLE customers ADD COLUMN IF NOT EXISTS name TEXT;
+        ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS year TEXT;
+        ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS owner_name TEXT;
+        ALTER TABLE attendance ADD COLUMN IF NOT EXISTS shift_start TEXT DEFAULT '08:00';
+        ALTER TABLE employees ADD COLUMN IF NOT EXISTS default_shift TEXT DEFAULT '08:00';
+        ALTER TABLE supplier_purchases ADD COLUMN IF NOT EXISTS bill_url TEXT;
+        ALTER TABLE bills ADD COLUMN IF NOT EXISTS cash_amount REAL DEFAULT 0;
+        ALTER TABLE bills ADD COLUMN IF NOT EXISTS gpay_amount REAL DEFAULT 0;
+      `);
+    } catch (err) {
+      console.warn("⚡ [DB] Supabase unreachable. Using local SQLite database:", err.message);
+      pool = null;
+    }
+  })();
 }
 
 const db = {
@@ -108,33 +122,26 @@ const db = {
             const res = await pool.query(pgSql, cleanArgs);
             return res.rows[0] || null;
           } catch (err) {
-            console.warn(`⚡ [DB] Postgres query error (${err.message}). Falling back to local SQLite...`);
+            console.warn(`⚡ [DB] Postgres query error (${err.message}). Disabling Postgres and switching to local SQLite...`);
+            try { pool.end(); } catch (e) {}
+            pool = null;
           }
         }
         return getSqlite().prepare(sql).get(...cleanArgs);
       },
       async all(...args) {
         const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);
-        const t0 = Date.now();
         if (pool) {
           try {
             const res = await pool.query(pgSql, cleanArgs);
-            // #region agent log
-            fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'C',location:'db.js:all',message:'db.all postgres',data:{ms:Date.now()-t0,rowCount:res.rows.length,sql:sql.slice(0,120),usedPostgres:true},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
             return res.rows;
           } catch (err) {
-            console.warn(`⚡ [DB] Postgres query error (${err.message}). Falling back to local SQLite...`);
-            // #region agent log
-            fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'C',location:'db.js:all-fallback',message:'postgres failed fallback sqlite',data:{ms:Date.now()-t0,err:String(err.message||err).slice(0,180),sql:sql.slice(0,120)},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
+            console.warn(`⚡ [DB] Postgres query error (${err.message}). Disabling Postgres and switching to local SQLite...`);
+            try { pool.end(); } catch (e) {}
+            pool = null;
           }
         }
-        const rows = getSqlite().prepare(sql).all(...cleanArgs);
-        // #region agent log
-        fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'C',location:'db.js:all-sqlite',message:'db.all sqlite',data:{ms:Date.now()-t0,rowCount:rows.length,sql:sql.slice(0,120),usedPostgres:false},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-        return rows;
+        return getSqlite().prepare(sql).all(...cleanArgs);
       },
       async run(...args) {
         const cleanArgs = args.flat().map(arg => (arg === undefined || arg === 'null' || arg === 'undefined' || (typeof arg === 'number' && isNaN(arg))) ? null : arg);
@@ -150,7 +157,9 @@ const db = {
             return { lastInsertRowid, changes: res.rowCount };
           } catch (err) {
             if (err.code === '23505') return { lastInsertRowid: null, changes: 0 };
-            console.warn(`⚡ [DB] Postgres query error (${err.message}). Falling back to local SQLite...`);
+            console.warn(`⚡ [DB] Postgres query error (${err.message}). Disabling Postgres and switching to local SQLite...`);
+            try { pool.end(); } catch (e) {}
+            pool = null;
           }
         }
         const stmt = getSqlite().prepare(sql);
@@ -164,7 +173,9 @@ const db = {
       try {
         return await pool.query(sql);
       } catch (err) {
-        console.warn(`⚡ [DB] Postgres exec error (${err.message}). Falling back to local SQLite...`);
+        console.warn(`⚡ [DB] Postgres exec error (${err.message}). Disabling Postgres and switching to local SQLite...`);
+        try { pool.end(); } catch (e) {}
+        pool = null;
       }
     }
     return getSqlite().exec(sql);

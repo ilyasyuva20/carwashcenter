@@ -2,6 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
+process.on('unhandledRejection', (reason) => {
+  console.warn('⚡ Unhandled Rejection:', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.warn('⚡ Uncaught Exception:', err?.message || err);
+});
+
 require('./db'); // initializes schema + seed data
 
 const path = require('path');

@@ -3,4 +3,5 @@ node_modules/
 *.sqlite
 *.db
 logs/
+*.log
 .DS_Store

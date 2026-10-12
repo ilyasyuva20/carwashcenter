@@ -158,6 +158,185 @@ router.post('/update', async (req, res) => {
   }
 });
 
+// Bulk mark attendance across date range (e.g. Oct 1 - Oct 10)
+router.post('/bulk-mark', async (req, res) => {
+  try {
+    const { start_date, end_date, employee_ids, status, skip_sundays, override_existing } = req.body;
+    if (!start_date || !end_date) {
+      return res.status(400).json({ error: 'start_date and end_date are required' });
+    }
+
+    let emps = [];
+    if (Array.isArray(employee_ids) && employee_ids.length > 0) {
+      const placeholders = employee_ids.map(() => '?').join(',');
+      emps = await db.prepare(`SELECT * FROM employees WHERE id IN (${placeholders})`).all(...employee_ids);
+    } else {
+      emps = await db.prepare('SELECT * FROM employees WHERE active = 1').all();
+    }
+
+    const start = new Date(start_date + 'T00:00:00');
+    const end = new Date(end_date + 'T00:00:00');
+    let count = 0;
+
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      if (skip_sundays && d.getDay() === 0) continue;
+
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const dateStr = `${y}-${m}-${day}`;
+
+      for (const emp of emps) {
+        const existing = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(emp.id, dateStr);
+        if (existing && !override_existing) continue;
+
+        const expectedShift = (existing && existing.shift_start) || emp.default_shift || '08:00';
+        const targetStatus = status || 'present';
+
+        if (existing) {
+          await db.prepare('UPDATE attendance SET status=?, shift_start=? WHERE id=?').run(targetStatus, expectedShift, existing.id);
+        } else {
+          await db.prepare('INSERT INTO attendance (employee_id, date, status, shift_start) VALUES (?, ?, ?, ?)').run(emp.id, dateStr, targetStatus, expectedShift);
+        }
+        count++;
+      }
+    }
+
+    res.json({ success: true, records_updated: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk import attendance records from parsed CSV/Excel JSON
+router.post('/import-csv', async (req, res) => {
+  try {
+    const { date: targetDate, records } = req.body;
+    if (!Array.isArray(records) || records.length === 0) {
+      return res.status(400).json({ error: 'records array is required' });
+    }
+
+    const allEmps = await db.prepare('SELECT * FROM employees ORDER BY name ASC').all();
+    let count = 0;
+
+    for (const rec of records) {
+      const dateStr = String(rec.date || targetDate || '').trim();
+      if (!dateStr) continue;
+
+      let emp = null;
+      if (rec.employee_id) {
+        emp = allEmps.find(e => e.id == rec.employee_id);
+      }
+      if (!emp && rec.phone) {
+        const cleanPhone = String(rec.phone).replace(/\D/g, '');
+        if (cleanPhone) {
+          emp = allEmps.find(e => (e.phone || '').replace(/\D/g, '').includes(cleanPhone));
+        }
+      }
+      if (!emp && rec.employee_name) {
+        const q = String(rec.employee_name).toLowerCase().trim();
+        emp = allEmps.find(e => (e.name || '').toLowerCase().trim() === q || (e.name || '').toLowerCase().includes(q));
+      }
+      if (!emp && rec.sl_no && !isNaN(rec.sl_no)) {
+        const idx = Number(rec.sl_no) - 1;
+        if (idx >= 0 && idx < allEmps.length) {
+          emp = allEmps[idx];
+        }
+      }
+
+      if (!emp) continue;
+
+      const status = (rec.status || 'present').toLowerCase().trim();
+      const shiftStart = rec.shift_start || emp.default_shift || '08:00';
+      const checkIn = rec.check_in || null;
+      const checkOut = rec.check_out || null;
+      const lateMins = rec.late_minutes !== undefined ? Number(rec.late_minutes) : 0;
+
+      const existing = await db.prepare('SELECT * FROM attendance WHERE employee_id=? AND date=?').get(emp.id, dateStr);
+
+      if (existing) {
+        await db.prepare(`
+          UPDATE attendance
+          SET status=?, check_in=?, check_out=?, late_minutes=?, shift_start=?
+          WHERE id=?
+        `).run(status, checkIn || existing.check_in, checkOut || existing.check_out, lateMins, shiftStart, existing.id);
+      } else {
+        await db.prepare(`
+          INSERT INTO attendance (employee_id, date, status, check_in, check_out, late_minutes, shift_start)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(emp.id, dateStr, status, checkIn, checkOut, lateMins, shiftStart);
+      }
+      count++;
+    }
+
+    res.json({ success: true, records_imported: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk save all staff attendance for a given date in a single API call
+router.post('/bulk-save', async (req, res) => {
+  try {
+    const { date: targetDate, records } = req.body;
+    if (!targetDate || !Array.isArray(records)) {
+      return res.status(400).json({ error: 'date and records array are required' });
+    }
+
+    let savedCount = 0;
+    for (const rec of records) {
+      if (!rec.employee_id) continue;
+
+      const emp = await db.prepare('SELECT default_shift FROM employees WHERE id=?').get(rec.employee_id);
+      const shiftStart = rec.shift_start || (emp && emp.default_shift) || '08:00';
+      const status = rec.status || 'not_marked';
+      const checkIn = rec.check_in || null;
+      const checkOut = rec.check_out || null;
+
+      // Update default_shift if updated
+      if (rec.shift_start) {
+        try {
+          await db.prepare('UPDATE employees SET default_shift = ? WHERE id = ?').run(rec.shift_start, rec.employee_id);
+        } catch (e) {}
+      }
+
+      // Compute late minutes if check_in exists
+      let lateMins = Number(rec.late_minutes) || 0;
+      if (checkIn && String(checkIn).trim() !== '') {
+        lateMins = Math.max(0, toMinutes(checkIn) - toMinutes(shiftStart));
+      }
+
+      // Compute overtime minutes if check_out exists
+      let otMins = Number(rec.overtime_minutes) || 0;
+      if (checkOut && String(checkOut).trim() !== '') {
+        otMins = Math.max(0, toMinutes(checkOut) - toMinutes(SHIFT_END));
+      }
+
+      const existing = await db.prepare('SELECT id FROM attendance WHERE employee_id=? AND date=?').get(rec.employee_id, targetDate);
+
+      if (existing) {
+        await db.prepare(`
+          UPDATE attendance
+          SET status=?, check_in=?, check_out=?, late_minutes=?, overtime_minutes=?, shift_start=?
+          WHERE id=?
+        `).run(status, checkIn, checkOut, lateMins, otMins, shiftStart, existing.id);
+      } else {
+        await db.prepare(`
+          INSERT INTO attendance (employee_id, date, status, check_in, check_out, late_minutes, overtime_minutes, shift_start)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(rec.employee_id, targetDate, status, checkIn, checkOut, lateMins, otMins, shiftStart);
+      }
+      savedCount++;
+    }
+
+    res.json({ success: true, records_saved: savedCount, date: targetDate });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
+
+
 
 

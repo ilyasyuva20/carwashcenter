@@ -18,7 +18,7 @@ async function computePayroll(employee_id, month, year) {
     `SELECT * FROM advances WHERE employee_id = ? AND date LIKE ?`
   ).all(employee_id, monthPattern);
 
-  const baseSalary = Number(emp.salary_monthly) || 0;
+  const baseSalary = Number(emp.salary_monthly || emp.monthly_salary || (emp.daily_wage ? emp.daily_wage * 30 : 0)) || 0;
   const perDaySalary = baseSalary / 30; // ₹600/day for ₹18,000 monthly
   const hourlyRate = perDaySalary / 8; // 8 hours duty -> ₹75/hour
   const perMinuteRate = hourlyRate / 60; // ₹1.25/minute

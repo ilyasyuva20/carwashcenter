@@ -542,33 +542,46 @@ router.get('/bike-workshop-report', async (req, res) => {
 // 7. Attendance Report Endpoint
 router.get('/attendance-report', async (req, res) => {
   try {
-    const { from, to } = req.query;
-    const startDate = from || getTodayIST();
-    const endDate = to || getTodayIST();
+    const { from, to, month, year } = req.query;
+    
+    let startDate, endDate;
+    if (month && year) {
+      const m = String(month).padStart(2, '0');
+      const lastDay = new Date(year, month, 0).getDate();
+      startDate = `${year}-${m}-01`;
+      endDate = `${year}-${m}-${String(lastDay).padStart(2, '0')}`;
+    } else {
+      const today = new Date().toISOString().slice(0, 10);
+      startDate = from || `${today.slice(0, 7)}-01`;
+      endDate = to || today;
+    }
 
-    const employees = await db.prepare("SELECT id, name, role, phone FROM employees WHERE active = 1 ORDER BY name ASC").all();
+    const employees = await db.prepare("SELECT id, name, role, phone, default_shift FROM employees WHERE active = 1 ORDER BY name ASC").all();
     const allRecords = await db.prepare(`
-      SELECT a.*, e.name as employee_name
+      SELECT a.*, e.name as employee_name, e.role as employee_role
       FROM attendance a
       JOIN employees e ON e.id = a.employee_id
-      ORDER BY a.date DESC
+      ORDER BY a.date ASC, e.name ASC
     `).all();
 
     const records = allRecords.filter(r => {
-      const d = getISTDateStr(r.date);
+      const d = String(r.date).trim();
       return d >= startDate && d <= endDate;
     });
 
     let presentCount = 0;
     let absentCount = 0;
     let halfDayCount = 0;
+    let leaveCount = 0;
     let totalLateMinutes = 0;
     let totalOvertimeMinutes = 0;
 
     records.forEach(r => {
-      if (r.status === 'present') presentCount++;
-      else if (r.status === 'absent') absentCount++;
-      else if (r.status === 'half_day') halfDayCount++;
+      const s = (r.status || '').toLowerCase();
+      if (s === 'present') presentCount++;
+      else if (s === 'absent') absentCount++;
+      else if (s === 'half_day' || s === 'halfday') halfDayCount++;
+      else if (s === 'leave') leaveCount++;
 
       totalLateMinutes += Number(r.late_minutes) || 0;
       totalOvertimeMinutes += Number(r.overtime_minutes) || 0;
@@ -577,11 +590,14 @@ router.get('/attendance-report', async (req, res) => {
     res.json({
       from: startDate,
       to: endDate,
+      month: month ? Number(month) : null,
+      year: year ? Number(year) : null,
       total_employees: employees.length,
       total_records: records.length,
       present_count: presentCount,
       absent_count: absentCount,
       half_day_count: halfDayCount,
+      leave_count: leaveCount,
       total_late_minutes: totalLateMinutes,
       total_overtime_minutes: totalOvertimeMinutes,
       employees,
