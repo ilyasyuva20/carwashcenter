@@ -30,8 +30,9 @@ function getBillAmounts(b) {
 }
 
 async function summaryFor(date) {
-  const allBills = await db.prepare(`SELECT * FROM bills WHERE status='paid'`).all();
-  const bills = allBills.filter(b => getISTDateStr(b.paid_at || b.created_at) === date);
+  const bills = await db.prepare(
+    `SELECT * FROM bills WHERE status='paid' AND (paid_at LIKE ? OR paid_at IS NULL)`
+  ).all(`${date}%`);
   let cash = 0, gpay = 0;
   bills.forEach(b => {
     const amt = getBillAmounts(b);
@@ -40,8 +41,10 @@ async function summaryFor(date) {
   });
   const revenue = cash + gpay;
   
-  const allJobs = await db.prepare(`SELECT entry_time FROM jobs`).all();
-  const jobsToday = allJobs.filter(j => getISTDateStr(j.entry_time) === date).length;
+  const jobsRow = await db.prepare(
+    `SELECT COUNT(*) as c FROM jobs WHERE entry_time LIKE ?`
+  ).get(`${date}%`);
+  const jobsToday = jobsRow ? Number(jobsRow.c) : 0;
 
   const expensesRow = await db.prepare(`SELECT COALESCE(SUM(amount),0) as s FROM expenses WHERE date = ?`).get(date);
   const expenses = expensesRow ? Number(expensesRow.s) : 0;
@@ -55,8 +58,9 @@ async function summaryFor(date) {
 async function ledgerFor(date) {
   const op = (await db.prepare('SELECT opening_cash, opening_gpay FROM daily_opening_balances WHERE date = ?').get(date)) || { opening_cash: 0, opening_gpay: 0 };
   
-  const allBills = await db.prepare(`SELECT * FROM bills WHERE status='paid'`).all();
-  const bills = allBills.filter(b => getISTDateStr(b.paid_at || b.created_at) === date);
+  const bills = await db.prepare(
+    `SELECT * FROM bills WHERE status='paid' AND (paid_at LIKE ? OR paid_at IS NULL)`
+  ).all(`${date}%`);
   let cashSales = 0, gpaySales = 0;
   bills.forEach(b => {
     const amt = getBillAmounts(b);

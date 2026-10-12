@@ -72,29 +72,37 @@ async function getJobsFullBatch(jobsOrIds, options = {}) {
     ? db.prepare(`SELECT * FROM vehicles WHERE id IN (${vehicleIds.map(() => '?').join(',')})`).all(...vehicleIds)
     : Promise.resolve([]);
 
-  const washTypesPromise = db.prepare('SELECT * FROM wash_types').all();
-  const workshopsPromise = db.prepare('SELECT * FROM workshops').all();
-  const pricingPromise = db.prepare('SELECT * FROM pricing').all();
-  const workshopPricingPromise = db.prepare('SELECT * FROM workshop_pricing').all();
-  const billsPromise = jobIds.length > 0
-    ? db.prepare(`SELECT * FROM bills WHERE job_id IN (${jobIds.map(() => '?').join(',')})`).all(...jobIds)
-    : Promise.resolve([]);
+let refDataCache = null;
+let refDataCacheTime = 0;
+const REF_CACHE_TTL = 60000; // 60 seconds
+
+async function getRefData() {
+  const now = Date.now();
+  if (refDataCache && (now - refDataCacheTime) < REF_CACHE_TTL) {
+    return refDataCache;
+  }
+  const [washTypesList, workshopsList, pricingList, workshopPricingList] = await Promise.all([
+    db.prepare('SELECT * FROM wash_types').all(),
+    db.prepare('SELECT * FROM workshops').all(),
+    db.prepare('SELECT * FROM pricing').all(),
+    db.prepare('SELECT * FROM workshop_pricing').all()
+  ]);
+  refDataCache = { washTypesList, workshopsList, pricingList, workshopPricingList };
+  refDataCacheTime = now;
+  return refDataCache;
+}
 
   const [
     vehiclesList,
-    washTypesList,
-    workshopsList,
-    pricingList,
-    workshopPricingList,
-    billsList
+    billsList,
+    refData
   ] = await Promise.all([
     vehiclesPromise,
-    washTypesPromise,
-    workshopsPromise,
-    pricingPromise,
-    workshopPricingPromise,
-    billsPromise
+    billsPromise,
+    getRefData()
   ]);
+
+  const { washTypesList, workshopsList, pricingList, workshopPricingList } = refData;
 
   const customerIds = [...new Set(vehiclesList.map(v => v.customer_id).filter(Boolean))];
   const customersList = customerIds.length > 0
@@ -340,29 +348,32 @@ router.post('/', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const t0 = Date.now();
     const { status, date, payment_status, customer_type } = req.query;
-    let jobs = await db.prepare('SELECT * FROM jobs ORDER BY id DESC').all();
-    const allCount = jobs.length;
-    if (status) jobs = jobs.filter(j => j.status === status);
-    if (payment_status) jobs = jobs.filter(j => j.payment_status === payment_status);
-    if (customer_type) jobs = jobs.filter(j => j.customer_type === customer_type);
-    if (date) {
-      jobs = jobs.filter(j => {
-        if (!j.entry_time) return false;
-        const dt = new Date(j.entry_time);
-        if (isNaN(dt.getTime())) return j.entry_time.startsWith(date);
-        const istDt = new Date(dt.getTime() + (5.5 * 60 * 60 * 1000));
-        const dStr = `${istDt.getUTCFullYear()}-${String(istDt.getUTCMonth() + 1).padStart(2, '0')}-${String(istDt.getUTCDate()).padStart(2, '0')}`;
-        return dStr === date;
-      });
+    const conditions = [];
+    const params = [];
+
+    if (status) {
+      conditions.push('status = ?');
+      params.push(status);
     }
-    
+    if (payment_status) {
+      conditions.push('payment_status = ?');
+      params.push(payment_status);
+    }
+    if (customer_type) {
+      conditions.push('customer_type = ?');
+      params.push(customer_type);
+    }
+    if (date) {
+      conditions.push('(entry_time LIKE ? OR entry_time LIKE ?)');
+      params.push(`${date}%`, `%${date}%`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sql = `SELECT ${JOB_LIST_COLS} FROM jobs ${whereClause} ORDER BY id DESC LIMIT 500`;
+    let jobs = await db.prepare(sql).all(...params);
+
     const fullJobs = await getJobsFullBatch(jobs);
-    const payloadBytes = Buffer.byteLength(JSON.stringify(fullJobs));
-    // #region agent log
-    fetch('http://127.0.0.1:7618/ingest/e176f1cd-2325-4489-82d4-cb737f29d94a',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fee15e'},body:JSON.stringify({sessionId:'fee15e',runId:'pre-fix',hypothesisId:'A',location:'jobs.js:GET /',message:'GET /jobs complete',data:{ms:Date.now()-t0,allCount,filteredCount:jobs.length,payloadBytes,status:status||null,date:date||null},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     res.json(fullJobs);
   } catch (err) {
     res.status(500).json({ error: err.message });

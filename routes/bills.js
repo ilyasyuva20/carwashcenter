@@ -398,6 +398,7 @@ router.get('/', async (req, res) => {
       WHERE (j.customer_type != 'workshop' OR j.customer_type IS NULL)
         AND (j.status = 'completed' OR j.payment_status = 'settled' OR b.status = 'paid')
       ORDER BY j.id DESC
+      LIMIT 250
     `).all();
 
     // Fetch full job objects in single batch query for maximum speed
